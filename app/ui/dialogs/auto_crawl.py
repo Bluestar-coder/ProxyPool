@@ -1,10 +1,9 @@
 from __future__ import annotations
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
+    QDialog, QVBoxLayout, QHBoxLayout, QGroupBox,
     QCheckBox, QLineEdit, QSpinBox, QComboBox, QLabel,
     QDialogButtonBox, QPushButton, QScrollArea, QWidget,
 )
-from PyQt6.QtCore import Qt
 import keyring
 
 
