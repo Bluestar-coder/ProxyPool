@@ -1,7 +1,4 @@
-import sys
-import asyncio
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
 from app.db.models import ProxyCandidate
 from app.core.crawlers.base import CrawlerResult
 
