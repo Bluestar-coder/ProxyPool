@@ -323,17 +323,59 @@ class MainWindow(QMainWindow):
         self._db.update_validation(result)
 
     def _on_batch_manage(self):
-        selected = self._table.selectedIndexes()
-        count = len(set(i.row() for i in selected))
-        dlg = BatchManageDialog(count, self)
+        selected_rows = sorted(set(i.row() for i in self._table.selectedIndexes()))
+        selected_ids = [
+            p.id for row in selected_rows
+            if (p := self._model.get_proxy(row)) is not None
+        ]
+        dlg = BatchManageDialog(len(selected_ids), self)
+        dlg.delete_selected.connect(lambda: self._delete_selected(selected_ids))
         dlg.delete_invalid.connect(self._delete_invalid)
+        dlg.reset_status.connect(lambda: self._reset_status(selected_ids))
+        dlg.validate_selected.connect(lambda: self._validate_selected(selected_ids))
         dlg.exec()
+
+    def _delete_selected(self, proxy_ids: list[int]):
+        if not proxy_ids:
+            return
+        self._db.delete_proxies(proxy_ids)
+        self._log_event(f"[管理] 删除选中 {len(proxy_ids)} 个代理")
+        self._refresh_table()
 
     def _delete_invalid(self):
         invalid = [p for p in self._db.get_all_proxies() if p.status == "invalid"]
         self._db.delete_proxies([p.id for p in invalid])
         self._log_event(f"[管理] 删除 {len(invalid)} 个无效代理")
         self._refresh_table()
+
+    def _reset_status(self, proxy_ids: list[int]):
+        if not proxy_ids:
+            return
+        self._db.reset_proxy_status(proxy_ids)
+        self._log_event(f"[管理] 重置 {len(proxy_ids)} 个代理状态为未知")
+        self._refresh_table()
+
+    def _validate_selected(self, proxy_ids: list[int]):
+        if not proxy_ids:
+            return
+        id_set = set(proxy_ids)
+        proxies = [p for p in self._db.get_all_proxies() if p.id in id_set]
+        if not proxies:
+            return
+        self._validator_thread = ValidatorThread(
+            proxies=proxies,
+            endpoint=self._config.validator_endpoint,
+            backup_endpoint=self._config.validator_endpoint_backup,
+            timeout=self._config.validator_timeout,
+            concurrency=self._config.validator_concurrency,
+        )
+        self._validator_thread.result_ready.connect(self._on_validation_result)
+        self._validator_thread.progress.connect(
+            lambda done, total: self._log_event(f"[验证] {done}/{total}")
+        )
+        self._validator_thread.finished.connect(self._refresh_table)
+        self._validator_thread.start()
+        self._log_event(f"[验证] 开始验证选中 {len(proxies)} 个代理")
 
     def _on_export(self):
         proxies = self._db.get_all_proxies()

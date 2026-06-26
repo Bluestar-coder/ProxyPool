@@ -7,7 +7,15 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+import keyring
+
 from app.db.models import Proxy, ValidationResult
+
+_KEYRING_SERVICE = "ProxyPool"
+
+
+def _keyring_key(host: str, port: int, type_: str, username: str) -> str:
+    return f"proxy|{host}|{port}|{type_}|{username}"
 
 
 def _now_iso() -> str:
@@ -15,13 +23,17 @@ def _now_iso() -> str:
 
 
 def _row_to_proxy(row: sqlite3.Row) -> Proxy:
+    host, port, type_, username = row["host"], row["port"], row["type"], row["username"]
+    password = ""
+    if username:
+        password = keyring.get_password(_KEYRING_SERVICE, _keyring_key(host, port, type_, username)) or ""
     return Proxy(
         id=row["id"],
-        host=row["host"],
-        port=row["port"],
-        type=row["type"],
-        username=row["username"],
-        password=row["password"],
+        host=host,
+        port=port,
+        type=type_,
+        username=username,
+        password=password,
         region=row["region"],
         latency=row["latency"],
         status=row["status"],
@@ -112,6 +124,9 @@ class Database:
     def upsert_proxy(self, p: Proxy) -> int:
         assert self._conn is not None
         now = _now_iso()
+        # Store password in keyring; SQLite column stays empty.
+        if p.username and p.password:
+            keyring.set_password(_KEYRING_SERVICE, _keyring_key(p.host, p.port, p.type, p.username), p.password)
         with self._write_lock:
             cur = self._conn.execute(
                 """
@@ -122,7 +137,6 @@ class Database:
                 )
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(host, port, type, username) DO UPDATE SET
-                    password             = excluded.password,
                     region               = CASE WHEN excluded.region     != ''       THEN excluded.region     ELSE region     END,
                     latency              = CASE WHEN excluded.latency    != -1       THEN excluded.latency    ELSE latency    END,
                     status               = CASE WHEN excluded.status     != 'unknown' THEN excluded.status    ELSE status     END,
@@ -136,7 +150,7 @@ class Database:
                     updated_at           = excluded.updated_at
                 """,
                 (
-                    p.host, p.port, p.type, p.username, p.password, p.region,
+                    p.host, p.port, p.type, p.username, "", p.region,
                     p.latency, p.status, p.anonymity,
                     int(p.supports_rdns), int(p.auth_required),
                     p.use_count, p.fail_count, p.consecutive_failures,
@@ -207,6 +221,18 @@ class Database:
         with self._write_lock:
             self._conn.execute(
                 f"DELETE FROM proxies WHERE id IN ({placeholders})", proxy_ids
+            )
+            self._conn.commit()
+
+    def reset_proxy_status(self, proxy_ids: list[int]) -> None:
+        assert self._conn is not None
+        if not proxy_ids:
+            return
+        placeholders = ",".join("?" * len(proxy_ids))
+        with self._write_lock:
+            self._conn.execute(
+                f"UPDATE proxies SET status='unknown', updated_at=? WHERE id IN ({placeholders})",
+                [_now_iso(), *proxy_ids],
             )
             self._conn.commit()
 
