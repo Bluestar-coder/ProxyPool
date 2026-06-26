@@ -65,6 +65,36 @@ class Database:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._create_schema()
+        self._migrate_passwords_to_keyring()
+
+    def _migrate_passwords_to_keyring(self) -> None:
+        """One-time migration: move legacy plaintext passwords from SQLite to keyring."""
+        assert self._conn is not None
+        rows = self._conn.execute(
+            "SELECT id, host, port, type, username, password FROM proxies "
+            "WHERE password != '' AND username != ''"
+        ).fetchall()
+        if not rows:
+            return
+        migrated: list[int] = []
+        for row in rows:
+            try:
+                keyring.set_password(
+                    _KEYRING_SERVICE,
+                    _keyring_key(row["host"], row["port"], row["type"], row["username"]),
+                    row["password"],
+                )
+                migrated.append(row["id"])
+            except Exception:
+                pass
+        if migrated:
+            placeholders = ",".join("?" * len(migrated))
+            with self._write_lock:
+                self._conn.execute(
+                    f"UPDATE proxies SET password='' WHERE id IN ({placeholders})",
+                    migrated,
+                )
+                self._conn.commit()
 
     def close(self) -> None:
         if self._conn:
@@ -124,10 +154,10 @@ class Database:
     def upsert_proxy(self, p: Proxy) -> int:
         assert self._conn is not None
         now = _now_iso()
-        # Store password in keyring; SQLite column stays empty.
-        if p.username and p.password:
-            keyring.set_password(_KEYRING_SERVICE, _keyring_key(p.host, p.port, p.type, p.username), p.password)
         with self._write_lock:
+            # Store password in keyring before the SQL write; SQLite column stays empty.
+            if p.username and p.password:
+                keyring.set_password(_KEYRING_SERVICE, _keyring_key(p.host, p.port, p.type, p.username), p.password)
             cur = self._conn.execute(
                 """
                 INSERT INTO proxies(
