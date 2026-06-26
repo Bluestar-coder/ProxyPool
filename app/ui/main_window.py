@@ -278,8 +278,26 @@ class MainWindow(QMainWindow):
         dlg = AutoCrawlDialog(self)
         if dlg.exec():
             config = dlg.get_config()
-            self._log_event(f"[爬取] 配置: {config}")
-            # CrawlerThread 启动（Task 15 补充）
+            from app.core.crawler_thread import CrawlerThread
+            self._crawler_thread = CrawlerThread(config)
+            self._crawler_thread.found.connect(
+                lambda n: self._log_event(f"[爬取] 已发现 {n} 个候选代理")
+            )
+            self._crawler_thread.log.connect(self._log_event)
+            self._crawler_thread.finished.connect(self._on_crawl_finished)
+            self._crawler_thread.start()
+            self._log_event("[爬取] 开始爬取...")
+
+    def _on_crawl_finished(self, candidates: list):
+        from app.db.models import Proxy
+        proxies = [
+            Proxy(host=c.host, port=c.port, type=c.type,
+                  username=c.username, source=c.source)
+            for c in candidates
+        ]
+        self._db.upsert_proxies(proxies)
+        self._log_event(f"[爬取] 完成，新增/更新 {len(proxies)} 个代理")
+        self._refresh_table()
 
     def _on_validate(self):
         all_proxies = self._db.get_all_proxies()
