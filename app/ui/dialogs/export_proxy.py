@@ -3,7 +3,7 @@ import csv
 import json
 from pathlib import Path
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QComboBox, QCheckBox,
+    QDialog, QVBoxLayout, QComboBox, QCheckBox,
     QDialogButtonBox, QLabel, QFileDialog,
 )
 from app.db.models import Proxy

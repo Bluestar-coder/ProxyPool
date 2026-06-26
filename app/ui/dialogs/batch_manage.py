@@ -1,6 +1,6 @@
 from __future__ import annotations
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
+    QDialog, QVBoxLayout, QPushButton,
     QLabel, QDialogButtonBox,
 )
 from PyQt6.QtCore import pyqtSignal
