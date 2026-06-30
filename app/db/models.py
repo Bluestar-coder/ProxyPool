@@ -12,6 +12,7 @@ class Proxy:
     password: str = ""
     region: str = ""
     latency: float = -1
+    speed: float = -1  # KB/s, -1 = untested
     status: str = "unknown"
     anonymity: str = ""
     supports_rdns: bool = True
@@ -48,6 +49,7 @@ class ValidationResult:
     latency: float
     anonymity: str
     region: str
+    speed: float = -1.0  # KB/s, -1 = untested
     error: str = ""
     endpoint: str = ""
 

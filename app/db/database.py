@@ -2,16 +2,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 import keyring
+import keyring.errors
 
 from app.db.models import Proxy, ValidationResult
 
 _KEYRING_SERVICE = "ProxyPool"
+_logger = logging.getLogger(__name__)
 
 
 def _keyring_key(host: str, port: int, type_: str, username: str) -> str:
@@ -36,6 +39,7 @@ def _row_to_proxy(row: sqlite3.Row) -> Proxy:
         password=password,
         region=row["region"],
         latency=row["latency"],
+        speed=row["speed"] if "speed" in row.keys() else -1,
         status=row["status"],
         anonymity=row["anonymity"],
         supports_rdns=bool(row["supports_rdns"]),
@@ -52,6 +56,7 @@ class Database:
         self._path = path
         self._conn: sqlite3.Connection | None = None
         self._write_lock = threading.Lock()
+        self.migration_failed_hosts: list[str] = []
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -65,18 +70,23 @@ class Database:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._create_schema()
-        self._migrate_passwords_to_keyring()
+            self._migrate_schema()
+        self.migration_failed_hosts = self._migrate_passwords_to_keyring()
 
-    def _migrate_passwords_to_keyring(self) -> None:
-        """One-time migration: move legacy plaintext passwords from SQLite to keyring."""
+    def _migrate_passwords_to_keyring(self) -> list[str]:
+        """One-time migration: move legacy plaintext passwords to keyring.
+
+        Returns list of 'host:port' strings for proxies that failed migration.
+        """
         assert self._conn is not None
         rows = self._conn.execute(
             "SELECT id, host, port, type, username, password FROM proxies "
             "WHERE password != '' AND username != ''"
         ).fetchall()
         if not rows:
-            return
+            return []
         migrated: list[int] = []
+        failed: list[str] = []
         for row in rows:
             try:
                 keyring.set_password(
@@ -85,8 +95,11 @@ class Database:
                     row["password"],
                 )
                 migrated.append(row["id"])
-            except Exception:
-                pass
+            except keyring.errors.KeyringError as exc:
+                _logger.error(
+                    "Keyring migration failed for %s:%s: %s", row["host"], row["port"], exc
+                )
+                failed.append(f"{row['host']}:{row['port']}")
         if migrated:
             placeholders = ",".join("?" * len(migrated))
             with self._write_lock:
@@ -95,6 +108,7 @@ class Database:
                     migrated,
                 )
                 self._conn.commit()
+        return failed
 
     def close(self) -> None:
         if self._conn:
@@ -113,6 +127,7 @@ class Database:
                 password             TEXT NOT NULL DEFAULT '',
                 region               TEXT NOT NULL DEFAULT '',
                 latency              REAL NOT NULL DEFAULT -1,
+                speed                REAL NOT NULL DEFAULT -1,
                 status               TEXT NOT NULL DEFAULT 'unknown',
                 anonymity            TEXT NOT NULL DEFAULT '',
                 supports_rdns        INTEGER NOT NULL DEFAULT 1,
@@ -146,6 +161,15 @@ class Database:
             );
         """)
         self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Add missing columns to existing tables."""
+        assert self._conn is not None
+        cursor = self._conn.execute("PRAGMA table_info(proxies)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "speed" not in columns:
+            self._conn.execute("ALTER TABLE proxies ADD COLUMN speed REAL NOT NULL DEFAULT -1")
+            self._conn.commit()
 
     # ------------------------------------------------------------------ #
     # Proxy CRUD
@@ -239,20 +263,44 @@ class Database:
 
     def delete_proxy(self, proxy_id: int) -> None:
         assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT host, port, type, username FROM proxies WHERE id=?", (proxy_id,)
+        ).fetchone()
         with self._write_lock:
             self._conn.execute("DELETE FROM proxies WHERE id=?", (proxy_id,))
             self._conn.commit()
+        if row and row["username"]:
+            try:
+                keyring.delete_password(
+                    _KEYRING_SERVICE,
+                    _keyring_key(row["host"], row["port"], row["type"], row["username"]),
+                )
+            except keyring.errors.PasswordDeleteError:
+                pass
 
     def delete_proxies(self, proxy_ids: list[int]) -> None:
         assert self._conn is not None
         if not proxy_ids:
             return
         placeholders = ",".join("?" * len(proxy_ids))
+        rows = self._conn.execute(
+            f"SELECT host, port, type, username FROM proxies WHERE id IN ({placeholders})",
+            proxy_ids,
+        ).fetchall()
         with self._write_lock:
             self._conn.execute(
                 f"DELETE FROM proxies WHERE id IN ({placeholders})", proxy_ids
             )
             self._conn.commit()
+        for row in rows:
+            if row["username"]:
+                try:
+                    keyring.delete_password(
+                        _KEYRING_SERVICE,
+                        _keyring_key(row["host"], row["port"], row["type"], row["username"]),
+                    )
+                except keyring.errors.PasswordDeleteError:
+                    pass
 
     def reset_proxy_status(self, proxy_ids: list[int]) -> None:
         assert self._conn is not None
@@ -274,12 +322,18 @@ class Database:
         assert self._conn is not None
         now = _now_iso()
         with self._write_lock:
+            # Proxy may have been deleted while validation was running.
+            if not self._conn.execute(
+                "SELECT 1 FROM proxies WHERE id=?", (result.proxy_id,)
+            ).fetchone():
+                return
             if result.success:
                 self._conn.execute(
                     """
                     UPDATE proxies SET
                         status               = 'valid',
                         latency              = ?,
+                        speed                = CASE WHEN ? >= 0 THEN ? ELSE speed END,
                         anonymity            = CASE WHEN ? != '' THEN ? ELSE anonymity END,
                         region               = CASE WHEN ? != '' THEN ? ELSE region END,
                         last_success_at      = ?,
@@ -290,6 +344,7 @@ class Database:
                     """,
                     (
                         result.latency,
+                        result.speed, result.speed,
                         result.anonymity, result.anonymity,
                         result.region, result.region,
                         now, now, now,
@@ -341,12 +396,36 @@ class Database:
             )
             self._conn.commit()
 
+    def batch_update_regions(self, proxy_regions: dict[int, str]) -> None:
+        """Bulk-update region for multiple proxies in a single transaction."""
+        assert self._conn is not None
+        if not proxy_regions:
+            return
+        now = _now_iso()
+        with self._write_lock:
+            for proxy_id, region in proxy_regions.items():
+                if region:
+                    self._conn.execute(
+                        "UPDATE proxies SET region=?, updated_at=? WHERE id=?",
+                        (region, now, proxy_id),
+                    )
+            self._conn.commit()
+
     def increment_use_count(self, proxy_id: int) -> None:
         assert self._conn is not None
         with self._write_lock:
             self._conn.execute(
                 "UPDATE proxies SET use_count = use_count + 1, updated_at = ? WHERE id = ?",
                 (_now_iso(), proxy_id),
+            )
+            self._conn.commit()
+
+    def update_speed(self, proxy_id: int, speed_kbps: float) -> None:
+        assert self._conn is not None
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE proxies SET speed = ?, updated_at = ? WHERE id = ?",
+                (speed_kbps, _now_iso(), proxy_id),
             )
             self._conn.commit()
 
