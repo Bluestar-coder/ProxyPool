@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-import asyncio
+import logging
+import threading
 import time
 from enum import Enum
 
 from app.db.models import Proxy, ProxyEndpoint
+
+_logger = logging.getLogger(__name__)
 
 
 class RotationMode(Enum):
@@ -18,7 +21,10 @@ class RotationMode(Enum):
 
 
 class ProxyRotator:
-    """Six rotation modes. All shared state is protected by asyncio.Lock."""
+    """Six rotation modes. Shared state is protected by threading.RLock so that
+    synchronous UI-thread calls (load_proxies, set_mode) and async SOCKS-server
+    calls are mutually exclusive without deadlock.
+    """
 
     def __init__(self) -> None:
         self._proxies: list[Proxy] = []
@@ -26,7 +32,7 @@ class ProxyRotator:
         self._index: int = 0
         self._mode: RotationMode = RotationMode.ROUND_ROBIN
         self._params: dict = {}
-        self._lock: asyncio.Lock = asyncio.Lock()
+        self._lock: threading.RLock = threading.RLock()
         self._consecutive_success: int = 0
         self._last_switch_time: float = time.monotonic()
 
@@ -35,34 +41,38 @@ class ProxyRotator:
     # ------------------------------------------------------------------
 
     def load_proxies(self, proxies: list[Proxy]) -> None:
-        self._proxies = list(proxies)
-        self._valid = [p for p in proxies if p.status == "valid"]
-        self._index = 0
-        self._consecutive_success = 0
-        self._last_switch_time = time.monotonic()
+        with self._lock:
+            self._proxies = list(proxies)
+            self._valid = [p for p in proxies if p.status == "valid"]
+            self._index = 0
+            self._consecutive_success = 0
+            self._last_switch_time = time.monotonic()
 
     def set_mode(self, mode: RotationMode, **params) -> None:
-        self._mode = mode
-        self._params = params
-        self._index = 0
-        self._consecutive_success = 0
-        self._last_switch_time = time.monotonic()
+        with self._lock:
+            self._mode = mode
+            self._params = params
+            self._index = 0
+            self._consecutive_success = 0
+            self._last_switch_time = time.monotonic()
+            _logger.info("Rotator set_mode: %s, params=%s", mode, params)
 
-        if mode == RotationMode.FIXED and self._valid:
-            best = min(self._valid, key=lambda p: p.latency)
-            self._index = self._valid.index(best)
+            if mode == RotationMode.FIXED and self._valid:
+                best = min(self._valid, key=lambda p: p.latency)
+                self._index = self._valid.index(best)
 
     def get_current(self) -> Proxy | None:
-        if not self._valid:
-            return None
-        return self._valid[self._index % len(self._valid)]
+        with self._lock:
+            if not self._valid:
+                return None
+            return self._valid[self._index % len(self._valid)]
 
     # ------------------------------------------------------------------
     # Async API
     # ------------------------------------------------------------------
 
     async def on_request_start(self) -> ProxyEndpoint | None:
-        async with self._lock:
+        with self._lock:
             if not self._valid:
                 return None
 
@@ -75,7 +85,9 @@ class ProxyRotator:
 
             proxy = self._valid[self._index % len(self._valid)]
 
-            # ROUND_ROBIN advances on each request
+            # ROUND_ROBIN: advance immediately so concurrent connections that
+            # start before any prior one finishes still fan out across
+            # distinct proxies instead of collapsing onto the same index.
             if self._mode == RotationMode.ROUND_ROBIN:
                 self._index = (self._index + 1) % len(self._valid)
 
@@ -85,34 +97,59 @@ class ProxyRotator:
                 supports_rdns=proxy.supports_rdns,
             )
 
-    async def on_request_done(self, proxy_id: int, success: bool) -> None:
-        async with self._lock:
+    async def on_request_done(self, proxy_id: int, success: bool) -> Proxy | None:
+        """Returns the new current proxy if a switch happened, else None.
+
+        Resolving the new proxy here (under the same lock acquisition that
+        performs the switch) avoids a TOCTOU window a separate get_current()
+        call would have against a concurrent load_proxies().
+        """
+        with self._lock:
             if not self._valid:
-                return
+                return None
+
+            switched = False
+
+            # ROUND_ROBIN: rotation already happened in on_request_start
+            # (each connection fans out to the next proxy immediately);
+            # nothing left to do here for either outcome.
 
             if self._mode == RotationMode.FAILOVER:
                 if not success:
                     self._index = (self._index + 1) % len(self._valid)
                     self._consecutive_success = 0
+                    switched = True
 
             elif self._mode == RotationMode.BY_COUNT:
                 threshold = self._params.get("threshold", 10)
                 if success:
                     self._consecutive_success += 1
+                    _logger.debug("BY_COUNT: success %d/%d", self._consecutive_success, threshold)
                     if self._consecutive_success >= threshold:
+                        old_idx = self._index
                         self._index = (self._index + 1) % len(self._valid)
                         self._consecutive_success = 0
+                        switched = True
+                        _logger.info("BY_COUNT: switched proxy %d -> %d", old_idx, self._index)
                 else:
+                    # On failure, switch immediately
+                    self._index = (self._index + 1) % len(self._valid)
                     self._consecutive_success = 0
+                    switched = True
+                    _logger.debug("BY_COUNT: failed, switch and reset count")
 
             elif self._mode == RotationMode.BY_SCENE:
-                # Semantic: user switches scene on failure
                 if not success:
                     self._index = (self._index + 1) % len(self._valid)
+                    switched = True
+
+            if switched:
+                return self._valid[self._index % len(self._valid)]
+            return None
 
     async def on_response_body(self, proxy_id: int, body: bytes) -> None:
         """BY_KEYWORD: switch when trigger_word appears or required_word is absent."""
-        async with self._lock:
+        with self._lock:
             if self._mode != RotationMode.BY_KEYWORD or not self._valid:
                 return
 
@@ -129,7 +166,7 @@ class ProxyRotator:
                 self._index = (self._index + 1) % len(self._valid)
 
     async def force_switch(self) -> None:
-        async with self._lock:
+        with self._lock:
             if self._valid:
                 self._index = (self._index + 1) % len(self._valid)
                 self._consecutive_success = 0

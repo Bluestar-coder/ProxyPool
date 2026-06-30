@@ -15,6 +15,12 @@ def build_socks5_reply(code: int) -> bytes:
     return bytes([5, code, 0, 1, 0, 0, 0, 0, 0, 0])
 
 
+def safe_proxy_addr(url: str) -> str:
+    """host:port for display/logging - strips scheme and any credentials."""
+    after_scheme = url.split("://", 1)[-1]
+    return after_scheme.rsplit("@", 1)[-1].rstrip("/")
+
+
 async def parse_address(atyp: int, reader: asyncio.StreamReader) -> tuple[str, int]:
     # Read atyp from reader (parameter is ignored - caller already consumed VER/CMD/RSV/ATYP
     # header bytes separately, so the wire atyp byte arrives here via reader)
@@ -58,12 +64,14 @@ async def _relay(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
 
 class SocksServerThread(AsyncWorkerThread):
     status_changed = pyqtSignal(str)   # "running" | "stopped" | "no_upstream"
-    client_connected = pyqtSignal(str)  # "host:port"
+    client_connected = pyqtSignal(str)  # "proxy -> target"
+    proxy_switched = pyqtSignal(str)    # "host:port" of new proxy
 
     def __init__(self, rotator: ProxyRotator, port: int = 51024) -> None:
         super().__init__()
         self._rotator = rotator
         self._port = port
+        self._last_shown_proxy_id: int | None = None
 
     async def main(self) -> None:
         server = await asyncio.start_server(
@@ -124,8 +132,6 @@ class SocksServerThread(AsyncWorkerThread):
         # reader. Tests mock reader directly. In production, we pass atyp as a hint.
         host, port = await _parse_address_with_hint(atyp, reader)
 
-        self.client_connected.emit(f"{host}:{port}")
-
         endpoint = await self._rotator.on_request_start()
         if endpoint is None:
             self.status_changed.emit("no_upstream")
@@ -134,13 +140,26 @@ class SocksServerThread(AsyncWorkerThread):
             writer.close()
             return
 
+        proxy_addr = safe_proxy_addr(endpoint.url)
+        self.client_connected.emit(f"{proxy_addr} -> {host}:{port}")
+
+        # Some modes (e.g. ROUND_ROBIN) decide the next proxy inside
+        # on_request_start rather than on_request_done; catch those switches
+        # here so the "current proxy" UI label stays accurate in real time.
+        if endpoint.proxy_id != self._last_shown_proxy_id:
+            self._last_shown_proxy_id = endpoint.proxy_id
+            self.proxy_switched.emit(proxy_addr)
+
         try:
             proxy = Proxy.from_url(endpoint.url, rdns=endpoint.supports_rdns)
             sock = await asyncio.wait_for(
                 proxy.connect(dest_host=host, dest_port=port), timeout=8
             )
         except Exception:
-            await self._rotator.on_request_done(endpoint.proxy_id, success=False)
+            cur = await self._rotator.on_request_done(endpoint.proxy_id, success=False)
+            if cur:
+                self._last_shown_proxy_id = cur.id
+                self.proxy_switched.emit(f"{cur.host}:{cur.port}")
             writer.write(build_socks5_reply(0x05))
             await writer.drain()
             writer.close()
@@ -156,7 +175,10 @@ class SocksServerThread(AsyncWorkerThread):
             _relay(rem_reader, writer),
         )
 
-        await self._rotator.on_request_done(endpoint.proxy_id, success=True)
+        cur = await self._rotator.on_request_done(endpoint.proxy_id, success=True)
+        if cur:
+            self._last_shown_proxy_id = cur.id
+            self.proxy_switched.emit(f"{cur.host}:{cur.port}")
         try:
             writer.close()
         except Exception:

@@ -19,10 +19,31 @@ def rotator():
 @pytest.mark.asyncio
 async def test_round_robin_cycles(rotator):
     rotator.set_mode(RotationMode.ROUND_ROBIN)
-    ids = [ep.proxy_id for ep in
-           [await rotator.on_request_start() for _ in range(4)]]
+    # Round-robin advances on every request_start, regardless of when
+    # (or whether) request_done is called for the prior request.
+    ids = []
+    for _ in range(4):
+        ep = await rotator.on_request_start()
+        ids.append(ep.proxy_id)
+        await rotator.on_request_done(ep.proxy_id, success=True)
     assert ids[:3] == [1, 2, 3]
-    assert ids[3] == 1  # 循环
+    assert ids[3] == 1  # Cycles back
+
+
+@pytest.mark.asyncio
+async def test_round_robin_fans_out_concurrent_requests(rotator):
+    """Concurrent connections that start before any prior one finishes must
+    still land on different proxies, not all collapse onto the same one."""
+    rotator.set_mode(RotationMode.ROUND_ROBIN)
+    ep1 = await rotator.on_request_start()
+    ep2 = await rotator.on_request_start()
+    ep3 = await rotator.on_request_start()
+    assert [ep1.proxy_id, ep2.proxy_id, ep3.proxy_id] == [1, 2, 3]
+    # Completing them later (in any order) must not re-advance the index.
+    await rotator.on_request_done(ep2.proxy_id, success=True)
+    await rotator.on_request_done(ep1.proxy_id, success=True)
+    ep4 = await rotator.on_request_start()
+    assert ep4.proxy_id == 1  # cycled back, not skipped ahead
 
 
 @pytest.mark.asyncio
@@ -62,3 +83,24 @@ async def test_failover_switches_on_failure(rotator):
     await rotator.on_request_done(ep1.proxy_id, success=False)
     ep2 = await rotator.on_request_start()
     assert ep2.proxy_id != ep1.proxy_id
+
+
+@pytest.mark.asyncio
+async def test_on_request_done_returns_new_current_proxy_atomically(rotator):
+    """on_request_done must hand back the proxy it switched to directly,
+    rather than callers re-acquiring the lock via a separate get_current()
+    call that a concurrent load_proxies() could race with."""
+    rotator.set_mode(RotationMode.FAILOVER)
+    ep1 = await rotator.on_request_start()
+    new_current = await rotator.on_request_done(ep1.proxy_id, success=False)
+    assert new_current is not None
+    assert new_current.id != ep1.proxy_id
+    assert new_current.id == rotator.get_current().id
+
+
+@pytest.mark.asyncio
+async def test_on_request_done_returns_none_when_no_switch(rotator):
+    rotator.set_mode(RotationMode.FAILOVER)
+    ep1 = await rotator.on_request_start()
+    result = await rotator.on_request_done(ep1.proxy_id, success=True)
+    assert result is None

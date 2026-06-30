@@ -3,7 +3,7 @@ import struct
 import socket
 import pytest
 from unittest.mock import AsyncMock, MagicMock
-from app.core.socks_server import build_socks5_reply, parse_address
+from app.core.socks_server import build_socks5_reply, parse_address, safe_proxy_addr
 
 
 @pytest.mark.asyncio
@@ -42,3 +42,11 @@ def test_build_reply_success():
 def test_build_reply_failure():
     reply = build_socks5_reply(0x04)
     assert reply[1] == 0x04
+
+
+def test_safe_proxy_addr_no_auth():
+    assert safe_proxy_addr("socks5://1.2.3.4:1080") == "1.2.3.4:1080"
+
+
+def test_safe_proxy_addr_strips_credentials():
+    assert safe_proxy_addr("socks5://user:pass@1.2.3.4:1080") == "1.2.3.4:1080"

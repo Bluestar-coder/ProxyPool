@@ -1,5 +1,12 @@
+import logging
 import sys
 from PyQt6.QtWidgets import QApplication
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 def main():
