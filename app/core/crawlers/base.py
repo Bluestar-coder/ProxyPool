@@ -54,11 +54,13 @@ class BaseCrawler(ABC):
         errors: list[str] = []
         quota_exhausted = False
         cursor: object = None
+        rate_limit_retries = 0
 
         while True:
             try:
                 page = await self.fetch_page(session, query, cursor)
                 candidates.extend(page.items)
+                rate_limit_retries = 0
 
                 if page.next_cursor is None or len(candidates) >= limit:
                     break
@@ -67,6 +69,10 @@ class BaseCrawler(ABC):
                 await asyncio.sleep(self.rate_limit)
 
             except RateLimited as exc:
+                rate_limit_retries += 1
+                if rate_limit_retries >= 3:
+                    logger.warning("%s rate-limited 3 times; giving up", self.name)
+                    break
                 logger.warning("%s rate-limited; sleeping %.1fs", self.name, exc.retry_after)
                 await asyncio.sleep(exc.retry_after)
 

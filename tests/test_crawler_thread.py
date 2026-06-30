@@ -39,8 +39,8 @@ class _FakeCrawlerThread:
         seen: set[tuple] = set()
 
         for result in gather_results:
-            if isinstance(result, Exception):
-                self._emit_log(f"[爬虫] 错误: {result}")
+            if isinstance(result, BaseException):
+                self._emit_log(f"[爬虫] 错误: {type(result).__name__}: {result}")
                 continue
             for c in result.candidates:
                 key = (c.host, c.port, c.type, c.username)
@@ -82,6 +82,23 @@ async def test_exception_results_logged_and_skipped():
     await t.main(results)
 
     assert any("network error" in m for m in t._log_calls)
+    assert len(t._finished_result) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_error_result_logged_and_skipped():
+    """asyncio.CancelledError is a BaseException, not an Exception - a
+    stopped crawl must not crash trying to read .candidates off it."""
+    import asyncio as _asyncio
+
+    t = _FakeCrawlerThread({})
+    results = [
+        _asyncio.CancelledError(),
+        _make_result([_make_candidate("9.9.9.9")]),
+    ]
+    await t.main(results)
+
+    assert any("CancelledError" in m or "cancel" in m.lower() for m in t._log_calls)
     assert len(t._finished_result) == 1
 
 

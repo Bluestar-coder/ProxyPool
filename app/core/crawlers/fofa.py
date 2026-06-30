@@ -41,7 +41,7 @@ class FofaCrawler(BaseCrawler):
         params = {
             "key": self._api_key,
             "qbase64": encoded,
-            "fields": "ip,port,protocol,country_name",
+            "fields": "ip,port,protocol",
             "size": self.page_size,
             "page": page,
         }
@@ -49,22 +49,28 @@ class FofaCrawler(BaseCrawler):
         async with session.get(_API_URL, params=params) as resp:
             if resp.status == 429:
                 raise RateLimited()
+            if resp.status == 401 or resp.status == 403:
+                raise RuntimeError(f"Fofa auth failed (HTTP {resp.status}): check your API key")
             if resp.status != 200:
                 raise RuntimeError(f"Fofa HTTP {resp.status}")
 
             data = await resp.json()
 
         if data.get("error"):
-            errmsg = data.get("errmsg", "")
-            logger.warning("Fofa error (key=***): %s", errmsg)
-            raise QuotaExhausted(errmsg)
+            errmsg: str = data.get("errmsg", "unknown error")
+            logger.warning("Fofa API error (key=***): %s", errmsg)
+            errmsg_lower = errmsg.lower()
+            if any(kw in errmsg_lower for kw in ("insufficient", "fcoin", "quota", "limit")):
+                raise QuotaExhausted(errmsg)
+            # auth errors or query syntax errors - not quota, let base.crawl log and break
+            raise RuntimeError(f"Fofa: {errmsg}")
 
         results: list[list] = data.get("results", [])
         items = [
             ProxyCandidate(
                 host=row[0],
                 port=int(row[1]),
-                type=row[2] if len(row) > 2 else "socks5",
+                type=(row[2].lower() if len(row) > 2 and row[2] else "socks5"),
                 source=self.name,
             )
             for row in results
