@@ -11,10 +11,10 @@ _DEFAULTS: dict = {
     "listen_port": 51024,
     "rotation_mode": "round_robin",
     "rotation_params": {},
-    "validator_concurrency": 100,
-    "validator_timeout": 10,
-    "validator_endpoint": "https://httpbin.org/ip",
-    "validator_endpoint_backup": "https://ip-api.com/json",
+    "validator_concurrency": 50,
+    "validator_timeout": 15,
+    "validator_endpoint": "http://ip-api.com/json",
+    "validator_endpoint_backup": "https://httpbin.org/ip",
     "geo_cache_ttl": 86400,
     "page_size": 10,
     "export_redact_password": True,
@@ -28,10 +28,10 @@ class Config:
     listen_port: int = 51024
     rotation_mode: str = "round_robin"
     rotation_params: dict = field(default_factory=dict)
-    validator_concurrency: int = 100
-    validator_timeout: int = 10
-    validator_endpoint: str = "https://httpbin.org/ip"
-    validator_endpoint_backup: str = "https://ip-api.com/json"
+    validator_concurrency: int = 50
+    validator_timeout: int = 15
+    validator_endpoint: str = "http://ip-api.com/json"
+    validator_endpoint_backup: str = "https://httpbin.org/ip"
     geo_cache_ttl: int = 86400
     page_size: int = 10
     export_redact_password: bool = True
