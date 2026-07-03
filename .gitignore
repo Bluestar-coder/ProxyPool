@@ -20,10 +20,14 @@ venv/
 .superpowers/
 .codegraph/
 
-# Test coverage
+# Test / coverage
 .coverage
 .coveragerc
 htmlcov/
+.pytest_cache/
+
+# Internal AI planning docs
+docs/superpowers/
 
 # PyInstaller build artifacts
 build/
