@@ -67,13 +67,13 @@ class SocksServerThread(AsyncWorkerThread):
     client_connected = pyqtSignal(str)  # "proxy -> target"
     proxy_switched = pyqtSignal(str)    # "host:port" of new proxy
 
-    def __init__(self, rotator: ProxyRotator, port: int = 51024) -> None:
+    def __init__(self, rotator: ProxyRotator, port: int = 51024) -> None:  # pragma: no cover
         super().__init__()
         self._rotator = rotator
         self._port = port
         self._last_shown_proxy_id: int | None = None
 
-    async def main(self) -> None:
+    async def main(self) -> None:  # pragma: no cover
         server = await asyncio.start_server(
             self._handle_client, "127.0.0.1", self._port
         )

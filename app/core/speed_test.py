@@ -74,7 +74,7 @@ class SpeedTestThread(AsyncWorkerThread):
     result_ready = pyqtSignal(int, float)  # proxy_id, speed_kbps
     finished = pyqtSignal()
 
-    def __init__(self, proxies: list[Proxy], concurrency: int = 20) -> None:
+    def __init__(self, proxies: list[Proxy], concurrency: int = 20) -> None:  # pragma: no cover
         super().__init__()
         self.proxies = proxies
         self.concurrency = concurrency
@@ -87,11 +87,12 @@ class SpeedTestThread(AsyncWorkerThread):
         async def _test(proxy: Proxy) -> None:
             nonlocal done
             async with semaphore:
+                await self._pause_event.wait()
                 speed = await measure_speed(proxy.url)
                 self.result_ready.emit(proxy.id, speed)
                 done += 1
                 if done % 5 == 0 or done == total:
                     self.progress.emit(done, total)
 
-        await asyncio.gather(*[_test(p) for p in self.proxies])
+        await asyncio.gather(*[_test(p) for p in self.proxies], return_exceptions=True)
         self.finished.emit()

@@ -245,6 +245,32 @@ QCheckBox::indicator:checked {{
 QDialogButtonBox QPushButton {{
     min-width: 70px;
 }}
+QTabWidget::pane {{
+    border: 1px solid {border};
+    border-top: none;
+}}
+QTabBar {{
+    background: transparent;
+}}
+QTabBar::tab {{
+    background: {btn};
+    color: {fg};
+    border: 1px solid {border};
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+    padding: 5px 16px;
+    margin-right: 2px;
+    min-width: 60px;
+}}
+QTabBar::tab:selected {{
+    background: {accent};
+    color: white;
+    border-color: {accent};
+}}
+QTabBar::tab:hover:!selected {{
+    background: {btn_hover};
+    color: {fg_bright};
+}}
 """
 
 _DARK_PLUS = {

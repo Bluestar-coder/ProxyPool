@@ -10,6 +10,21 @@ from app.db.models import Proxy, ProxyEndpoint
 _logger = logging.getLogger(__name__)
 
 
+def _quality_key(p: Proxy) -> tuple[float, float, float]:
+    """Sort key: success-rate-first (desc), then latency (asc), then speed (desc).
+
+    Success rate uses actual historical data when available (use_count + fail_count > 0),
+    or a neutral 0.5 for proxies with no usage history, so untested proxies
+    rank between proven-good and proven-bad ones and fall back to latency/speed.
+    Untested latency/speed (-1 sentinel) ranks worst on that axis.
+    """
+    total = p.use_count + p.fail_count
+    success_rank = -(p.use_count / total) if total > 0 else -0.5
+    latency = p.latency if p.latency >= 0 else float("inf")
+    speed = p.speed if p.speed >= 0 else float("-inf")
+    return (success_rank, latency, -speed)
+
+
 class RotationMode(Enum):
     ROUND_ROBIN = "round_robin"
     FAILOVER = "failover"
@@ -43,7 +58,9 @@ class ProxyRotator:
     def load_proxies(self, proxies: list[Proxy]) -> None:
         with self._lock:
             self._proxies = list(proxies)
-            self._valid = [p for p in proxies if p.status == "valid"]
+            valid = [p for p in proxies if p.status == "valid"]
+            valid.sort(key=_quality_key)
+            self._valid = valid
             self._index = 0
             self._consecutive_success = 0
             self._last_switch_time = time.monotonic()
@@ -52,14 +69,13 @@ class ProxyRotator:
         with self._lock:
             self._mode = mode
             self._params = params
+            # _valid is kept sorted best-first by load_proxies(), so index 0
+            # is always the lowest-latency (then fastest) proxy - including
+            # for FIXED mode, which simply pins to it.
             self._index = 0
             self._consecutive_success = 0
             self._last_switch_time = time.monotonic()
             _logger.info("Rotator set_mode: %s, params=%s", mode, params)
-
-            if mode == RotationMode.FIXED and self._valid:
-                best = min(self._valid, key=lambda p: p.latency)
-                self._index = self._valid.index(best)
 
     def get_current(self) -> Proxy | None:
         with self._lock:

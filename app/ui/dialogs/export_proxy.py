@@ -16,7 +16,8 @@ class ExportDialog(QDialog):
         self._proxies = proxies
 
         self._fmt = QComboBox()
-        self._fmt.addItems(["txt (host:port)", "txt (url)", "csv", "json"])
+        self._fmt.addItems(["txt (host:port)", "txt (url)", "csv", "json",
+                            "Clash (YAML)", "Surge (conf)"])
         self._valid_only = QCheckBox("仅导出有效代理")
         self._valid_only.setChecked(True)
         self._redact = QCheckBox("脱敏密码（推荐）")
@@ -73,3 +74,39 @@ def _write(path: Path, proxies: list[Proxy], fmt: str, redact: bool):
                 d["password"] = p.password
             data.append(d)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    elif fmt == "Clash (YAML)":
+        path.write_text(_to_clash_yaml(proxies, redact), encoding="utf-8")
+    elif fmt == "Surge (conf)":
+        path.write_text(_to_surge_conf(proxies, redact), encoding="utf-8")
+
+
+def _proxy_name(p: Proxy, idx: int) -> str:
+    region = f"-{p.region}" if p.region else ""
+    return f"SOCKS5{region}-{p.host}:{p.port}"
+
+
+def _to_clash_yaml(proxies: list[Proxy], redact: bool) -> str:
+    lines = ["proxies:"]
+    for i, p in enumerate(proxies):
+        name = _proxy_name(p, i)
+        pwd = "***" if redact else p.password
+        lines.append(f'  - name: "{name}"')
+        lines.append(f"    type: socks5")
+        lines.append(f"    server: {p.host}")
+        lines.append(f"    port: {p.port}")
+        if p.username:
+            lines.append(f"    username: {p.username}")
+            lines.append(f"    password: {pwd}")
+    return "\n".join(lines) + "\n"
+
+
+def _to_surge_conf(proxies: list[Proxy], redact: bool) -> str:
+    lines = ["[Proxy]"]
+    for i, p in enumerate(proxies):
+        name = _proxy_name(p, i)
+        pwd = "***" if redact else p.password
+        if p.username:
+            lines.append(f"{name} = socks5, {p.host}, {p.port}, {p.username}, {pwd}")
+        else:
+            lines.append(f"{name} = socks5, {p.host}, {p.port}")
+    return "\n".join(lines) + "\n"

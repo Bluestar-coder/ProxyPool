@@ -1,0 +1,100 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build macOS
+    runs-on: macos-14        # Apple Silicon; change to macos-13 for Intel
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Generate icon files
+        run: python scripts/make_icons.py
+
+      - name: Build app bundle
+        run: pyinstaller ProxyPool.spec --noconfirm
+
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "ProxyPool" \
+            -srcfolder dist/ProxyPool.app \
+            -ov -format UDZO \
+            dist/ProxyPool-mac.dmg
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProxyPool-mac
+          path: dist/ProxyPool-mac.dmg
+          if-no-files-found: error
+
+      - name: Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ProxyPool-mac.dmg
+
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Generate icon files
+        run: python scripts/make_icons.py
+
+      - name: Build executable
+        run: pyinstaller ProxyPool.spec --noconfirm
+
+      - name: Zip dist folder
+        run: |
+          Compress-Archive -Path dist\ProxyPool\* -DestinationPath dist\ProxyPool-windows.zip
+        shell: powershell
+
+      - name: Upload ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProxyPool-windows
+          path: dist/ProxyPool-windows.zip
+          if-no-files-found: error
+
+      - name: Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ProxyPool-windows.zip

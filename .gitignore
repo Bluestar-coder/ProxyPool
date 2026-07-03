@@ -1,7 +1,40 @@
-.superpowers/
+# Python
 __pycache__/
 *.pyc
-.env
+*.pyo
+*.pyd
 *.egg-info/
+.venv/
+venv/
+
+# Environment / secrets
+.env
+.env.*
+
+# IDE / OS
 .DS_Store
+.idea/
+.vscode/
+
+# Pilot / tooling
+.superpowers/
 .codegraph/
+
+# Test coverage
+.coverage
+.coveragerc
+htmlcov/
+
+# PyInstaller build artifacts
+build/
+dist/
+
+# Generated icon files (built from assets/icon.png via scripts/make_icons.py)
+assets/icon.icns
+assets/icon.ico
+assets/icon.iconset/
+
+# Local database (actual DB lives in ~/Library/Application Support/ProxyPool/)
+*.db
+*.sqlite
+*.sqlite3

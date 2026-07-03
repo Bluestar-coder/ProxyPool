@@ -1,7 +1,9 @@
+import textwrap
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from app.core.crawlers.fofa import FofaCrawler
 from app.core.crawlers.base import QuotaExhausted
+from app.core.crawlers import discover_crawlers
 
 
 @pytest.fixture
@@ -69,3 +71,26 @@ async def test_fofa_crawl_completes():
     result = await crawler.crawl(MagicMock(), {"query": "test"}, limit=10)
     assert len(result.candidates) == 2
     assert result.quota_exhausted is False
+
+
+def test_discover_crawlers_finds_builtins():
+    classes = discover_crawlers()
+    names = {c.__name__ for c in classes}
+    assert "FofaCrawler" in names
+    assert "QuakeCrawler" in names
+    assert "HunterCrawler" in names
+    assert "FreeSitesCrawler" in names
+
+
+def test_discover_crawlers_loads_plugin(tmp_path):
+    plugin_src = textwrap.dedent("""\
+        from app.core.crawlers.base import BaseCrawler, CrawlPage
+        class TestPluginCrawler(BaseCrawler):
+            source = "test_plugin"
+            async def fetch_page(self, session, query, cursor):
+                return CrawlPage(items=[], next_cursor=None)
+    """)
+    (tmp_path / "my_plugin.py").write_text(plugin_src)
+    classes = discover_crawlers(plugin_dir=tmp_path)
+    names = {c.__name__ for c in classes}
+    assert "TestPluginCrawler" in names

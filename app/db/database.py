@@ -14,6 +14,7 @@ import keyring.errors
 from app.db.models import Proxy, ValidationResult
 
 _KEYRING_SERVICE = "ProxyPool"
+_FOFA_KEYRING_KEY = "fofa_api_key"
 _logger = logging.getLogger(__name__)
 
 
@@ -228,16 +229,25 @@ class Database:
     def get_all_proxies(
         self,
         status: str | None = None,
+        region: str | None = None,
+        source: str | None = None,
         page: int = 1,
         page_size: int = 0,
     ) -> list[Proxy]:
         assert self._conn is not None
+        conditions: list[str] = []
+        params: list = []
         if status is not None:
-            sql = "SELECT * FROM proxies WHERE status=? ORDER BY id"
-            params: tuple = (status,)
-        else:
-            sql = "SELECT * FROM proxies ORDER BY id"
-            params = ()
+            conditions.append("status=?")
+            params.append(status)
+        if region is not None:
+            conditions.append("region=?")
+            params.append(region)
+        if source is not None:
+            conditions.append("source=?")
+            params.append(source)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT * FROM proxies{where} ORDER BY id"
         if page_size > 0:
             offset = (page - 1) * page_size
             sql += f" LIMIT {page_size} OFFSET {offset}"
@@ -251,15 +261,35 @@ class Database:
         ).fetchone()
         return _row_to_proxy(row) if row else None
 
-    def count_proxies(self, status: str | None = None) -> int:
+    def count_proxies(
+        self,
+        status: str | None = None,
+        region: str | None = None,
+        source: str | None = None,
+    ) -> int:
         assert self._conn is not None
+        conditions: list[str] = []
+        params: list = []
         if status is not None:
-            row = self._conn.execute(
-                "SELECT COUNT(*) FROM proxies WHERE status=?", (status,)
-            ).fetchone()
-        else:
-            row = self._conn.execute("SELECT COUNT(*) FROM proxies").fetchone()
+            conditions.append("status=?")
+            params.append(status)
+        if region is not None:
+            conditions.append("region=?")
+            params.append(region)
+        if source is not None:
+            conditions.append("source=?")
+            params.append(source)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        row = self._conn.execute(f"SELECT COUNT(*) FROM proxies{where}", params).fetchone()
         return row[0] if row else 0
+
+    def get_distinct_regions(self) -> list[str]:
+        """Return non-empty region values sorted alphabetically."""
+        assert self._conn is not None
+        rows = self._conn.execute(
+            "SELECT DISTINCT region FROM proxies WHERE region != '' ORDER BY region"
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def delete_proxy(self, proxy_id: int) -> None:
         assert self._conn is not None
@@ -454,3 +484,27 @@ class Database:
                 (key, serialized),
             )
             self._conn.commit()
+
+    def save_auto_crawl_config(self, config: dict) -> None:
+        """Persist the auto-crawl dialog's config for reuse by scheduled
+        maintenance. The FOFA api_key goes through keyring; everything
+        else is plain JSON in app_config."""
+        fofa = dict(config.get("fofa", {}))
+        api_key = fofa.pop("api_key", "")
+        if api_key:
+            keyring.set_password(_KEYRING_SERVICE, _FOFA_KEYRING_KEY, api_key)
+        else:
+            try:
+                keyring.delete_password(_KEYRING_SERVICE, _FOFA_KEYRING_KEY)
+            except keyring.errors.PasswordDeleteError:
+                pass
+        self.set_config("auto_crawl_config", {"fofa": fofa, "free": config.get("free", {})})
+
+    def load_auto_crawl_config(self) -> dict | None:
+        """Returns the last-saved auto-crawl config, or None if never configured."""
+        saved = self.get_config("auto_crawl_config", None)
+        if saved is None:
+            return None
+        fofa = dict(saved.get("fofa", {}))
+        fofa["api_key"] = keyring.get_password(_KEYRING_SERVICE, _FOFA_KEYRING_KEY) or ""
+        return {"fofa": fofa, "free": saved.get("free", {})}

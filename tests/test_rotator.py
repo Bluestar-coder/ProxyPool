@@ -1,12 +1,13 @@
-import asyncio
 import pytest
 from app.core.rotator import ProxyRotator, RotationMode
 from app.db.models import Proxy
 
 
-def make_proxy(id_, latency=100.0, status="valid"):
+def make_proxy(id_, latency=100.0, speed=-1.0, status="valid",
+               use_count=0, fail_count=0):
     return Proxy(id=id_, host=f"1.2.3.{id_}", port=1080, type="socks5",
-                 status=status, latency=latency)
+                 status=status, latency=latency, speed=speed,
+                 use_count=use_count, fail_count=fail_count)
 
 
 @pytest.fixture
@@ -104,3 +105,59 @@ async def test_on_request_done_returns_none_when_no_switch(rotator):
     ep1 = await rotator.on_request_start()
     result = await rotator.on_request_done(ep1.proxy_id, success=True)
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_load_proxies_orders_by_latency_then_speed(rotator):
+    """All modes start from the front of _valid, so load order should rank
+    low-latency proxies first and use speed as the tiebreaker."""
+    rotator.load_proxies([
+        make_proxy(1, latency=200, speed=10),
+        make_proxy(2, latency=50, speed=5),
+        make_proxy(3, latency=50, speed=80),   # same latency as #2, faster
+        make_proxy(4, latency=150, speed=999),  # higher latency wins nothing
+    ])
+    rotator.set_mode(RotationMode.ROUND_ROBIN)
+    ep = await rotator.on_request_start()
+    assert ep.proxy_id == 3  # lowest latency tier, fastest within it
+
+
+@pytest.mark.asyncio
+async def test_load_proxies_sinks_untested_proxies_last(rotator):
+    rotator.load_proxies([
+        make_proxy(1, latency=-1, speed=-1),    # never tested
+        make_proxy(2, latency=300, speed=1),    # tested, slow
+    ])
+    rotator.set_mode(RotationMode.ROUND_ROBIN)
+    ep = await rotator.on_request_start()
+    assert ep.proxy_id == 2  # any tested proxy outranks an untested one
+
+
+@pytest.mark.asyncio
+async def test_fixed_mode_uses_speed_as_tiebreak(rotator):
+    rotator.load_proxies([
+        make_proxy(1, latency=50, speed=2),     # tied latency, slow speed
+        make_proxy(2, latency=50, speed=500),   # tied latency, much faster
+    ])
+    rotator.set_mode(RotationMode.FIXED)
+    ep = await rotator.on_request_start()
+    assert ep.proxy_id == 2
+
+
+@pytest.mark.asyncio
+async def test_success_rate_outranks_low_latency():
+    """A proxy with proven high success rate beats a faster-but-flaky one."""
+    rotator = ProxyRotator()
+    rotator.load_proxies([
+        make_proxy(1, latency=50, use_count=2, fail_count=8),   # 20% - fast but flaky
+        make_proxy(2, latency=200, use_count=95, fail_count=5), # 95% - slow but reliable
+        make_proxy(3, latency=100),                              # untested - neutral
+    ])
+    rotator.set_mode(RotationMode.ROUND_ROBIN)
+    ep1 = await rotator.on_request_start()
+    ep2 = await rotator.on_request_start()
+    ep3 = await rotator.on_request_start()
+    ids = [ep1.proxy_id, ep2.proxy_id, ep3.proxy_id]
+    assert ids[0] == 2   # proven reliable first
+    assert ids[1] == 3   # untested neutral second (better than known-bad)
+    assert ids[2] == 1   # flaky last

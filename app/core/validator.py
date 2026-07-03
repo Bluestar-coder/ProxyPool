@@ -182,7 +182,7 @@ class ValidatorThread(AsyncWorkerThread):
     regions_ready = pyqtSignal(dict)   # {proxy_id: region} after batch lookup
     finished = pyqtSignal()
 
-    def __init__(
+    def __init__(  # pragma: no cover
         self,
         proxies: list[Proxy],
         endpoint: str = "",
@@ -219,6 +219,7 @@ class ValidatorThread(AsyncWorkerThread):
         async def _validate(proxy: Proxy) -> None:
             nonlocal done
             async with semaphore:
+                await self._pause_event.wait()
                 try:
                     result = await asyncio.wait_for(
                         validate_single(

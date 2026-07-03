@@ -9,6 +9,8 @@ DB_PATH = DATA_DIR / "proxies.db"
 
 _DEFAULTS: dict = {
     "listen_port": 51024,
+    "rest_api_port": 51025,
+    "http_proxy_port": 51026,
     "rotation_mode": "round_robin",
     "rotation_params": {},
     "validator_concurrency": 50,
@@ -18,6 +20,7 @@ _DEFAULTS: dict = {
     "geo_cache_ttl": 86400,
     "page_size": 10,
     "export_redact_password": True,
+    "auto_maintenance_enabled": False,
 }
 
 
@@ -26,6 +29,8 @@ class Config:
     _db: Database = field(repr=False)
 
     listen_port: int = 51024
+    rest_api_port: int = 51025
+    http_proxy_port: int = 51026
     rotation_mode: str = "round_robin"
     rotation_params: dict = field(default_factory=dict)
     validator_concurrency: int = 50
@@ -35,6 +40,7 @@ class Config:
     geo_cache_ttl: int = 86400
     page_size: int = 10
     export_redact_password: bool = True
+    auto_maintenance_enabled: bool = False
 
     @classmethod
     def load(cls, db: Database) -> "Config":

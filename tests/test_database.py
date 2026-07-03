@@ -108,3 +108,51 @@ def test_keyring_migration(db, monkeypatch):
     raw = db._conn.execute("SELECT password FROM proxies WHERE host='3.4.5.6'").fetchone()
     assert raw["password"] == "", "SQLite column must be cleared after migration"
     assert "oldpass" in store.values(), "password must be in keyring after migration"
+
+
+def test_auto_crawl_config_round_trip_keeps_api_key_out_of_sqlite(db, monkeypatch):
+    """FOFA api_key must go through keyring, never land in app_config as plaintext."""
+    store: dict[str, str] = {}
+    monkeypatch.setattr("keyring.set_password", lambda svc, key, pwd: store.update({key: pwd}))
+    monkeypatch.setattr("keyring.get_password", lambda svc, key: store.get(key))
+
+    config = {
+        "fofa": {"enabled": True, "limit": 500, "api_key": "user@example.com:s3cr3tkey", "queries": ["port=1080"]},
+        "free": {"enabled": True, "limit": 50},
+    }
+    db.save_auto_crawl_config(config)
+
+    raw = db._conn.execute("SELECT value FROM app_config WHERE key='auto_crawl_config'").fetchone()
+    assert "s3cr3tkey" not in raw["value"], "api_key must not be stored in app_config"
+    assert "user@example.com:s3cr3tkey" in store.values(), "api_key must be in keyring"
+
+    loaded = db.load_auto_crawl_config()
+    assert loaded == config
+
+
+def test_auto_crawl_config_returns_none_when_never_saved(db):
+    assert db.load_auto_crawl_config() is None
+
+
+def test_get_distinct_regions(db):
+    for host, region in [("1.1.1.1", "CN"), ("2.2.2.2", "US"), ("3.3.3.3", "CN"), ("4.4.4.4", "")]:
+        p = Proxy(host=host, port=1080, type="socks5", region=region, source="manual")
+        db.upsert_proxy(p)
+    regions = db.get_distinct_regions()
+    assert regions == ["CN", "US"]   # sorted, empty excluded
+
+
+def test_get_all_proxies_filters_by_region(db):
+    for host, region in [("1.1.1.1", "CN"), ("2.2.2.2", "US"), ("3.3.3.3", "CN")]:
+        db.upsert_proxy(Proxy(host=host, port=1080, type="socks5", region=region, source="manual"))
+    cn = db.get_all_proxies(region="CN")
+    assert len(cn) == 2
+    assert all(p.region == "CN" for p in cn)
+
+
+def test_count_proxies_filters_by_region(db):
+    for host, region in [("1.1.1.1", "CN"), ("2.2.2.2", "US")]:
+        db.upsert_proxy(Proxy(host=host, port=1080, type="socks5", region=region, source="manual"))
+    assert db.count_proxies(region="CN") == 1
+    assert db.count_proxies(region="US") == 1
+    assert db.count_proxies() == 2
