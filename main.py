@@ -1,11 +1,21 @@
 import logging
+import os
 import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
+load_dotenv()
+
+def _resolve_log_level() -> int:
+    raw = os.environ.get("PROXYPOOL_LOG_LEVEL", "INFO").upper()
+    return getattr(logging, raw, logging.INFO)
+
+
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=_resolve_log_level(),
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
 )

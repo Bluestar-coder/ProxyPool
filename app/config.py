@@ -1,11 +1,18 @@
 from __future__ import annotations
+
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
 import platformdirs
+
 from app.db.database import Database
 
-DATA_DIR = Path(platformdirs.user_data_dir("ProxyPool", appauthor=False))
-DB_PATH = DATA_DIR / "proxies.db"
+DATA_DIR = Path(
+    os.environ.get("PROXYPOOL_DATA_DIR")
+    or platformdirs.user_data_dir("ProxyPool", appauthor=False)
+)
+DB_PATH = Path(os.environ.get("PROXYPOOL_DB_PATH") or str(DATA_DIR / "proxies.db"))
 
 _DEFAULTS: dict = {
     "listen_port": 51024,
@@ -21,6 +28,16 @@ _DEFAULTS: dict = {
     "page_size": 10,
     "export_redact_password": True,
     "auto_maintenance_enabled": False,
+}
+
+# Environment variables take highest priority over DB-stored user preferences.
+_ENV_OVERRIDES: dict[str, tuple[str, type]] = {
+    "PROXYPOOL_SOCKS_PORT":              ("listen_port",             int),
+    "PROXYPOOL_REST_PORT":               ("rest_api_port",           int),
+    "PROXYPOOL_HTTP_PORT":               ("http_proxy_port",         int),
+    "PROXYPOOL_VALIDATOR_CONCURRENCY":   ("validator_concurrency",   int),
+    "PROXYPOOL_VALIDATOR_TIMEOUT":       ("validator_timeout",       int),
+    "PROXYPOOL_VALIDATOR_ENDPOINT":      ("validator_endpoint",      str),
 }
 
 
@@ -47,6 +64,9 @@ class Config:
         c = cls(_db=db)
         for key, default in _DEFAULTS.items():
             setattr(c, key, db.get_config(key, default))
+        for env_key, (attr, cast) in _ENV_OVERRIDES.items():
+            if val := os.environ.get(env_key):
+                setattr(c, attr, cast(val))
         return c
 
     def save(self):
