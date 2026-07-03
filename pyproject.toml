@@ -1,0 +1,39 @@
+[project]
+name = "proxypool"
+version = "0.1.0"
+description = "Desktop proxy pool manager"
+requires-python = ">=3.12"
+dependencies = [
+    "PyQt6>=6.6.0",
+    "python-socks>=2.4.0",
+    "aiohttp>=3.9.0",
+    "aiohttp-socks>=0.8.0",
+    "keyring>=25.0.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+    "platformdirs>=4.0.0",
+    "opencc-python-reimplemented>=0.1.7",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+proxypool = "main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-qt>=4.4.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.12.0",
+    "pyinstaller>=6.0.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

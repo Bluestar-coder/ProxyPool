@@ -57,7 +57,7 @@
 ```bash
 git clone https://github.com/Bluestar-coder/ProxyPool.git
 cd ProxyPool
-uv venv && uv pip install -r requirements.txt
+uv sync
 uv run python main.py
 ```
 
@@ -89,9 +89,9 @@ bash scripts/build.sh
 在 Windows 机器上执行：
 
 ```bat
-pip install -r requirements.txt pyinstaller
-python scripts/make_icons.py
-pyinstaller ProxyPool.spec --noconfirm
+uv sync --dev
+uv run python scripts/make_icons.py
+uv run pyinstaller ProxyPool.spec --noconfirm
 ```
 
 ### CI/CD（GitHub Actions）

@@ -4,15 +4,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-echo "-> Installing/upgrading deps..."
-pip install -q -r requirements.txt
-pip install -q pyinstaller
+echo "-> Syncing dependencies..."
+uv sync --dev
 
 echo "-> Generating icons..."
-python scripts/make_icons.py
+uv run python scripts/make_icons.py
 
 echo "-> Building with PyInstaller..."
-pyinstaller ProxyPool.spec --noconfirm
+uv run pyinstaller ProxyPool.spec --noconfirm
 
 echo "-> Creating DMG..."
 hdiutil create -volname "ProxyPool" \
@@ -21,5 +20,6 @@ hdiutil create -volname "ProxyPool" \
   dist/ProxyPool-mac.dmg
 
 echo ""
-echo "Done!  ->  dist/ProxyPool-mac.dmg"
-echo "        ->  dist/ProxyPool.app (run directly for testing)"
+echo "Done!"
+echo "  dist/ProxyPool-mac.dmg"
+echo "  dist/ProxyPool.app"

@@ -17,26 +17,23 @@ permissions:
 jobs:
   build-macos:
     name: Build macOS
-    runs-on: macos-14        # Apple Silicon; change to macos-13 for Intel
+    runs-on: macos-14
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v4
         with:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+        run: uv sync --dev
 
       - name: Generate icon files
-        run: python scripts/make_icons.py
+        run: uv run python scripts/make_icons.py
 
       - name: Build app bundle
-        run: pyinstaller ProxyPool.spec --noconfirm
+        run: uv run pyinstaller ProxyPool.spec --noconfirm
 
       - name: Create DMG
         run: |
@@ -65,26 +62,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v4
         with:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+        run: uv sync --dev
 
       - name: Generate icon files
-        run: python scripts/make_icons.py
+        run: uv run python scripts/make_icons.py
 
       - name: Build executable
-        run: pyinstaller ProxyPool.spec --noconfirm
+        run: uv run pyinstaller ProxyPool.spec --noconfirm
 
       - name: Zip dist folder
-        run: |
-          Compress-Archive -Path dist\ProxyPool\* -DestinationPath dist\ProxyPool-windows.zip
         shell: powershell
+        run: Compress-Archive -Path dist\ProxyPool\* -DestinationPath dist\ProxyPool-windows.zip
 
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
