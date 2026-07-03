@@ -1,15 +1,14 @@
-name: Build
+name: Release
 
 on:
   push:
-    branches:
-      - main
-    tags:
-      - "v*"
-  pull_request:
-    branches:
-      - main
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
 
 permissions:
   contents: write
@@ -49,12 +48,6 @@ jobs:
           path: dist/ProxyPool-mac.dmg
           if-no-files-found: error
 
-      - name: Release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/ProxyPool-mac.dmg
-
   build-windows:
     name: Build Windows
     runs-on: windows-latest
@@ -75,7 +68,7 @@ jobs:
       - name: Build executable
         run: uv run pyinstaller ProxyPool.spec --noconfirm
 
-      - name: Zip dist folder
+      - name: Create ZIP
         shell: powershell
         run: Compress-Archive -Path dist\ProxyPool\* -DestinationPath dist\ProxyPool-windows.zip
 
@@ -86,8 +79,39 @@ jobs:
           path: dist/ProxyPool-windows.zip
           if-no-files-found: error
 
-      - name: Release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
+  release:
+    name: Create GitHub Release
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve version tag
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ProxyPool-mac
+          path: artifacts
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ProxyPool-windows
+          path: artifacts
+
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ProxyPool-windows.zip
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: "ProxyPool ${{ steps.ver.outputs.tag }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: artifacts/*

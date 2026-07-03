@@ -4,7 +4,7 @@
 
 桌面代理池管理工具，基于 PyQt6 构建。从多个数据源抓取代理，自动验证连通性与测速，并通过本地 SOCKS5 / HTTP 代理和 REST API 对外提供服务。
 
-![build](https://github.com/Bluestar-coder/ProxyPool/actions/workflows/build.yml/badge.svg)
+![CI](https://github.com/Bluestar-coder/ProxyPool/actions/workflows/ci.yml/badge.svg) ![Release](https://github.com/Bluestar-coder/ProxyPool/actions/workflows/release.yml/badge.svg)
 
 ---
 
@@ -272,9 +272,10 @@ uv run pyinstaller ProxyPool.spec --noconfirm
 
 ### CI/CD（GitHub Actions）
 
-每次推送到 `main` 分支自动触发双平台构建，产物上传为 Artifact。
+- **每次推送 `main` / PR** — 自动运行测试套件（`ci.yml`，ubuntu-latest，免费 Linux runner）
+- **推送版本 Tag** — 触发双平台构建，两个平台的产物全部就绪后统一创建 **GitHub Release**（`release.yml`）
 
-推送版本 Tag 后自动创建 **GitHub Release** 并附上安装包：
+推送版本 Tag 触发发布：
 
 ```bash
 git tag v1.0.0

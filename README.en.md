@@ -4,7 +4,7 @@
 
 A desktop proxy pool manager built with PyQt6. Crawl proxies from multiple sources, validate connectivity, run speed tests, and serve the pool via local SOCKS5 / HTTP proxy and REST API.
 
-![build](https://github.com/Bluestar-coder/ProxyPool/actions/workflows/build.yml/badge.svg)
+![CI](https://github.com/Bluestar-coder/ProxyPool/actions/workflows/ci.yml/badge.svg) ![Release](https://github.com/Bluestar-coder/ProxyPool/actions/workflows/release.yml/badge.svg)
 
 ---
 
@@ -271,9 +271,10 @@ Output is in `dist\ProxyPool\`.
 
 ### CI/CD (GitHub Actions)
 
-Every push to `main` triggers a dual-platform build; artifacts are uploaded automatically.
+- **Every push to `main` / PR** — runs the test suite (`ci.yml`, ubuntu-latest, free Linux runner)
+- **Pushing a version tag** — triggers dual-platform builds; once both are ready, a unified **GitHub Release** is created (`release.yml`)
 
-Pushing a version tag creates a **GitHub Release** with downloadable installers:
+Push a version tag to trigger a release:
 
 ```bash
 git tag v1.0.0
