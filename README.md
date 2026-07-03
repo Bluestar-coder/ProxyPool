@@ -1,56 +1,58 @@
 # ProxyPool
 
-A desktop proxy pool manager with a PyQt6 GUI. Crawl, validate, speed-test, and serve proxies — all from one app.
+[English](README.en.md)
+
+桌面代理池管理工具，基于 PyQt6 构建。支持从多数据源抓取代理、验证连通性、测速，并通过本地服务对外提供代理服务。
 
 ![build](https://github.com/Bluestar-coder/ProxyPool/actions/workflows/build.yml/badge.svg)
 
 ---
 
-## Features
+## 功能特性
 
-- **Multi-source crawling** — FOFA, Hunter, Quake, and free public sites
-- **Subscription proxies** — import and auto-refresh from subscription URLs
-- **Validation** — concurrent connectivity checks with pause / resume / stop
-- **Speed test** — concurrent bandwidth tests with pause / resume / stop
-- **SOCKS5 server** — serves the valid proxy pool on a local port with round-robin / random rotation
-- **HTTP proxy server** — same pool exposed as an HTTP CONNECT proxy
-- **REST API** — lightweight JSON API to query and refresh the pool
-- **Export** — Clash YAML, Surge conf, or plain text; password redaction toggle
-- **Themes** — multiple built-in UI themes
+- **多源抓取** — 支持 FOFA、Hunter、Quake 及多个免费代理站点
+- **订阅代理** — 从订阅 URL 导入并自动刷新代理列表
+- **代理验证** — 并发连通性检测，支持暂停 / 继续 / 停止
+- **代理测速** — 并发带宽测试，支持暂停 / 继续 / 停止
+- **SOCKS5 服务** — 将有效代理池以本地 SOCKS5 代理形式对外提供，支持轮询 / 随机轮转
+- **HTTP 代理服务** — 同一代理池的 HTTP CONNECT 代理端口
+- **REST API** — 轻量 JSON 接口，支持查询和刷新代理池
+- **导出** — 支持 Clash YAML、Surge conf 及纯文本格式，可选密码脱敏
+- **多主题** — 内置多套 UI 主题
 
 ---
 
-## Ports (default)
+## 默认端口
 
-| Service | Port |
-|---------|------|
-| SOCKS5 server | 51024 |
+| 服务 | 端口 |
+|------|------|
+| SOCKS5 服务 | 51024 |
 | REST API | 51025 |
-| HTTP proxy | 51026 |
+| HTTP 代理 | 51026 |
 
-All ports are configurable in **Settings**.
+所有端口均可在 **设置** 中修改。
 
 ---
 
 ## REST API
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/proxy` | Get one proxy (rotated) |
-| `GET` | `/proxies` | List all valid proxies |
-| `GET` | `/status` | Pool size and service info |
-| `POST` | `/refresh` | Trigger re-validation |
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/proxy` | 获取一个代理（轮转） |
+| `GET` | `/proxies` | 列出所有有效代理 |
+| `GET` | `/status` | 代理池大小与服务信息 |
+| `POST` | `/refresh` | 触发重新验证 |
 
 ---
 
-## Requirements
+## 环境要求
 
 - Python 3.12+
-- macOS 11+ or Windows 10+
+- macOS 11+ 或 Windows 10+
 
 ---
 
-## Installation (development)
+## 开发环境安装
 
 ```bash
 git clone https://github.com/Bluestar-coder/ProxyPool.git
@@ -61,30 +63,30 @@ uv run python main.py
 
 ---
 
-## Crawler API Keys
+## 爬虫 API Key 配置
 
-Keys are stored in the **system keyring** (macOS Keychain / Windows Credential Manager) — never in source files or the database. Enter them once in **Settings → Crawlers**.
+所有 Key 存储在**系统 Keychain**（macOS Keychain / Windows 凭据管理器）中，不写入源码或数据库。首次使用在 **设置 → 爬虫** 中填写即可。
 
-| Source | Credential |
-|--------|-----------|
-| FOFA | email + API key |
-| Hunter | API key |
-| Quake | API key |
+| 数据源 | 所需凭据 |
+|--------|---------|
+| FOFA | 邮箱 + API Key |
+| Hunter | API Key |
+| Quake | API Key |
 
 ---
 
-## Build
+## 打包构建
 
-### macOS (local)
+### macOS（本地）
 
 ```bash
 bash scripts/build.sh
-# Output: dist/ProxyPool.app  and  dist/ProxyPool-mac.dmg
+# 输出: dist/ProxyPool.app  和  dist/ProxyPool-mac.dmg
 ```
 
 ### Windows
 
-Run on a Windows machine:
+在 Windows 机器上执行：
 
 ```bat
 pip install -r requirements.txt pyinstaller
@@ -92,30 +94,30 @@ python scripts/make_icons.py
 pyinstaller ProxyPool.spec --noconfirm
 ```
 
-### CI/CD (GitHub Actions)
+### CI/CD（GitHub Actions）
 
-Every push to `main` triggers a build. Pushing a version tag creates a GitHub Release with downloadable artifacts:
+每次推送到 `main` 分支自动构建。推送版本 tag 后自动创建 GitHub Release 并附上安装包：
 
 ```bash
 git tag v1.0.0
 git push origin v1.0.0
 ```
 
-Artifacts:
-- `ProxyPool-mac.dmg` — macOS (Apple Silicon, built on `macos-14`)
-- `ProxyPool-windows.zip` — Windows (built on `windows-latest`)
+产物：
+- `ProxyPool-mac.dmg` — macOS（Apple Silicon，基于 `macos-14` 构建）
+- `ProxyPool-windows.zip` — Windows（基于 `windows-latest` 构建）
 
 ---
 
-## Data storage
+## 数据存储
 
-| Data | Location |
-|------|----------|
-| Database (proxies, config) | `~/Library/Application Support/ProxyPool/` (macOS) / `%APPDATA%\ProxyPool\` (Windows) |
-| API keys / proxy passwords | System keyring |
-| Subscription URLs | Database (above) |
+| 数据类型 | 存储位置 |
+|---------|---------|
+| 数据库（代理、配置） | macOS: `~/Library/Application Support/ProxyPool/` / Windows: `%APPDATA%\ProxyPool\` |
+| API Key / 代理密码 | 系统 Keychain |
+| 订阅 URL | 数据库（同上） |
 
-No sensitive data is stored in the project directory or committed to source control.
+所有敏感数据均存储在项目目录之外，不会被提交到源码仓库。
 
 ---
 
