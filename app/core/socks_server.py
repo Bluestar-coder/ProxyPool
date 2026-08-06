@@ -21,29 +21,6 @@ def safe_proxy_addr(url: str) -> str:
     return after_scheme.rsplit("@", 1)[-1].rstrip("/")
 
 
-async def parse_address(atyp: int, reader: asyncio.StreamReader) -> tuple[str, int]:
-    # Read atyp from reader (parameter is ignored - caller already consumed VER/CMD/RSV/ATYP
-    # header bytes separately, so the wire atyp byte arrives here via reader)
-    atyp_byte = await reader.readexactly(1)
-    atyp = atyp_byte[0]
-
-    if atyp == 1:  # IPv4
-        ip_bytes = await reader.readexactly(4)
-        host = socket.inet_ntoa(ip_bytes)
-    elif atyp == 3:  # domain
-        length_byte = await reader.readexactly(1)
-        length = length_byte[0]
-        domain_bytes = await reader.readexactly(length)
-        host = domain_bytes.decode()
-    elif atyp == 4:  # IPv6 - unsupported
-        raise ValueError("ipv6_unsupported")
-    else:
-        raise ValueError(f"unknown_atyp_{atyp}")
-
-    port_bytes = await reader.readexactly(2)
-    port = struct.unpack("!H", port_bytes)[0]
-    return host, port
-
 
 async def _relay(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
     try:
@@ -95,13 +72,14 @@ class SocksServerThread(AsyncWorkerThread):
     async def _do_socks5(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        _T = 30.0  # per-read handshake timeout; slow clients are dropped
         # Greeting
-        header = await reader.readexactly(2)
+        header = await asyncio.wait_for(reader.readexactly(2), timeout=_T)
         if header[0] != 5:
             writer.close()
             return
         nmethods = header[1]
-        methods = await reader.readexactly(nmethods)
+        methods = await asyncio.wait_for(reader.readexactly(nmethods), timeout=_T)
         if 0 not in methods:
             writer.write(b"\x05\xff")
             await writer.drain()
@@ -111,7 +89,7 @@ class SocksServerThread(AsyncWorkerThread):
         await writer.drain()
 
         # Request
-        req_header = await reader.readexactly(4)
+        req_header = await asyncio.wait_for(reader.readexactly(4), timeout=_T)
         ver, cmd, _rsv, atyp = req_header
 
         if cmd != 1:
@@ -126,11 +104,7 @@ class SocksServerThread(AsyncWorkerThread):
             writer.close()
             return
 
-        # parse_address reads atyp from the reader - pass atyp to satisfy the signature
-        # but the implementation re-reads it from the wire; we must feed it back
-        # SHORTCUT: atyp already consumed from req_header; parse_address re-reads from
-        # reader. Tests mock reader directly. In production, we pass atyp as a hint.
-        host, port = await _parse_address_with_hint(atyp, reader)
+        host, port = await asyncio.wait_for(_parse_address_with_hint(atyp, reader), timeout=_T)
 
         endpoint = await self._rotator.on_request_start()
         if endpoint is None:
@@ -167,12 +141,28 @@ class SocksServerThread(AsyncWorkerThread):
 
         rem_reader, rem_writer = await asyncio.open_connection(sock=sock)
 
-        writer.write(build_socks5_reply(0x00))
-        await writer.drain()
+        try:
+            writer.write(build_socks5_reply(0x00))
+            await writer.drain()
+        except Exception:
+            try:
+                rem_writer.close()
+            except Exception:
+                pass
+            cur = await self._rotator.on_request_done(endpoint.proxy_id, success=False)
+            if cur:
+                self._last_shown_proxy_id = cur.id
+                self.proxy_switched.emit(f"{cur.host}:{cur.port}")
+            try:
+                writer.close()
+            except Exception:
+                pass
+            return
 
         await asyncio.gather(
             _relay(reader, rem_writer),
             _relay(rem_reader, writer),
+            return_exceptions=True,
         )
 
         cur = await self._rotator.on_request_done(endpoint.proxy_id, success=True)

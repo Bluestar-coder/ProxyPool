@@ -4,8 +4,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-from python_socks.async_.asyncio import Proxy as Socks5Proxy
 from PyQt6.QtCore import QThread, pyqtSignal
+from python_socks.async_.asyncio import Proxy as Socks5Proxy
 
 if TYPE_CHECKING:
     from app.core.rotator import ProxyRotator
@@ -30,6 +30,39 @@ async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
             pass
 
 
+async def _pipe_checking_keywords(
+    src: asyncio.StreamReader,
+    dst: asyncio.StreamWriter,
+    rotator: "ProxyRotator",
+    proxy_id: int,
+) -> None:
+    """Stream src to dst; accumulate first 1 MB so BY_KEYWORD mode can inspect it."""
+    _SCAN_LIMIT = 1 << 20  # 1 MB
+    scan_buf: bytearray = bytearray()
+    keyword_checked = False
+    try:
+        while chunk := await src.read(65536):
+            dst.write(chunk)
+            await dst.drain()
+            if not keyword_checked:
+                scan_buf += chunk
+                if len(scan_buf) >= _SCAN_LIMIT:
+                    await rotator.on_response_body(proxy_id, bytes(scan_buf))
+                    keyword_checked = True
+    except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
+        pass
+    finally:
+        if not keyword_checked:
+            try:
+                await rotator.on_response_body(proxy_id, bytes(scan_buf))
+            except Exception:
+                pass
+        try:
+            dst.close()
+        except Exception:
+            pass
+
+
 async def _handle(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -41,6 +74,10 @@ async def _handle(
         writer.close()
         return
 
+    if len(request_line) > 8192:
+        writer.close()
+        return
+
     parts = request_line.decode(errors="replace").strip().split()
     if len(parts) != 3:
         writer.close()
@@ -48,12 +85,28 @@ async def _handle(
 
     method, target, _ = parts
 
-    # Consume remaining request headers
+    # Collect request headers to forward upstream; parse Content-Length for body relay
+    headers: list[bytes] = []
+    content_length = 0
     try:
         while True:
             line = await asyncio.wait_for(reader.readline(), timeout=5)
             if line in (b"\r\n", b"\n", b""):
                 break
+            if len(headers) >= 200:
+                writer.write(
+                    b"HTTP/1.1 431 Request Header Fields Too Large\r\n"
+                    b"Content-Length: 0\r\n\r\n"
+                )
+                await writer.drain()
+                writer.close()
+                return
+            headers.append(line)
+            if line.lower().startswith(b"content-length:"):
+                try:
+                    content_length = int(line.split(b":", 1)[1].strip())
+                except ValueError:
+                    pass
     except asyncio.TimeoutError:
         writer.close()
         return
@@ -69,8 +122,10 @@ async def _handle(
     if method == "CONNECT":
         await _handle_connect(reader, writer, target, endpoint, rotator)
     else:
-        # Plain HTTP: reconnect to upstream target via SOCKS5 and replay request
-        await _handle_http(reader, writer, method, target, request_line, endpoint, rotator)
+        await _handle_http(
+            reader, writer, method, target,
+            headers, content_length, endpoint, rotator,
+        )
 
 
 async def _handle_connect(
@@ -87,6 +142,7 @@ async def _handle_connect(
         writer.write(_BAD_GATEWAY)
         await writer.drain()
         writer.close()
+        await rotator.on_request_done(endpoint.proxy_id, success=False)
         return
 
     try:
@@ -101,9 +157,16 @@ async def _handle_connect(
         await rotator.on_request_done(endpoint.proxy_id, success=False)
         return
 
-    writer.write(_CONNECT_ESTABLISHED)
-    await writer.drain()
-    await rotator.on_request_done(endpoint.proxy_id, success=True)
+    try:
+        writer.write(_CONNECT_ESTABLISHED)
+        await writer.drain()
+    except Exception:
+        try:
+            up_writer.close()
+        except Exception:
+            pass
+        await rotator.on_request_done(endpoint.proxy_id, success=False)
+        return
 
     await asyncio.gather(
         _pipe(reader, up_writer),
@@ -111,13 +174,16 @@ async def _handle_connect(
         return_exceptions=True,
     )
 
+    await rotator.on_request_done(endpoint.proxy_id, success=True)
+
 
 async def _handle_http(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     method: str,
     target: str,
-    first_line: bytes,
+    headers: list[bytes],
+    content_length: int,
     endpoint,
     rotator: "ProxyRotator",
 ) -> None:
@@ -135,6 +201,7 @@ async def _handle_http(
         writer.write(_BAD_GATEWAY)
         await writer.drain()
         writer.close()
+        await rotator.on_request_done(endpoint.proxy_id, success=False)
         return
 
     try:
@@ -149,17 +216,65 @@ async def _handle_http(
         await rotator.on_request_done(endpoint.proxy_id, success=False)
         return
 
-    # Rewrite request line to relative path
-    new_first = f"{method} {path} HTTP/1.1\r\n".encode()
-    body = await reader.read(65536)
-    up_writer.write(new_first + body)
-    await up_writer.drain()
-    await rotator.on_request_done(endpoint.proxy_id, success=True)
+    try:
+        # Forward rewritten request line + original headers
+        new_first = f"{method} {path} HTTP/1.1\r\n".encode()
+        up_writer.write(new_first + b"".join(headers) + b"\r\n")
 
-    response = await up_reader.read(65536)
-    writer.write(response)
-    await writer.drain()
-    writer.close()
+        # Forward request body
+        is_chunked = any(
+            b"transfer-encoding" in h.lower() and b"chunked" in h.lower()
+            for h in headers
+        )
+        if is_chunked:
+            # Relay chunked body chunk-by-chunk; terminate on the final "0\r\n" chunk
+            while True:
+                size_line = await asyncio.wait_for(reader.readline(), timeout=30)
+                up_writer.write(size_line)
+                try:
+                    chunk_size = int(size_line.split(b";", 1)[0].strip(), 16)
+                except ValueError:
+                    break
+                if chunk_size == 0:
+                    # Terminal chunk - forward optional trailers + final blank line
+                    while True:
+                        trailer = await asyncio.wait_for(reader.readline(), timeout=10)
+                        up_writer.write(trailer)
+                        if trailer in (b"\r\n", b"\n", b""):
+                            break
+                    await up_writer.drain()
+                    break
+                data = await asyncio.wait_for(
+                    reader.readexactly(chunk_size + 2), timeout=30
+                )
+                up_writer.write(data)
+                await up_writer.drain()
+        else:
+            # Relay exact Content-Length bytes; skip for GET/HEAD with no body
+            remaining = content_length
+            while remaining > 0:
+                chunk = await asyncio.wait_for(
+                    reader.read(min(remaining, 65536)), timeout=30
+                )
+                if not chunk:
+                    break
+                up_writer.write(chunk)
+                await up_writer.drain()
+                remaining -= len(chunk)
+
+        await up_writer.drain()
+
+        # Stream response back; accumulate first 1 MB for BY_KEYWORD inspection
+        await _pipe_checking_keywords(up_reader, writer, rotator, endpoint.proxy_id)
+        await rotator.on_request_done(endpoint.proxy_id, success=True)
+    except Exception:
+        await rotator.on_request_done(endpoint.proxy_id, success=False)
+        raise
+    finally:
+        try:
+            up_writer.close()
+        except Exception:
+            pass
 
 
 class HttpProxyThread(QThread):

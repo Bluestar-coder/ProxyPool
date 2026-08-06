@@ -56,14 +56,42 @@ class ProxyRotator:
     # ------------------------------------------------------------------
 
     def load_proxies(self, proxies: list[Proxy]) -> None:
+        # Sort outside the lock: list copy + sort can take hundreds of ms on
+        # large pools and would block the async event loop while held.
+        all_proxies = list(proxies)
+        valid = [p for p in proxies if p.status == "valid"]
+        valid.sort(key=_quality_key)
         with self._lock:
-            self._proxies = list(proxies)
-            valid = [p for p in proxies if p.status == "valid"]
-            valid.sort(key=_quality_key)
+            self._proxies = all_proxies
             self._valid = valid
             self._index = 0
             self._consecutive_success = 0
             self._last_switch_time = time.monotonic()
+
+    def update_proxies(self, proxies: list[Proxy]) -> None:
+        """Refresh the proxy pool without resetting rotation counters.
+
+        Unlike load_proxies(), preserves the current proxy selection by ID
+        so that a page flip or table reload during an active SOCKS/HTTP session
+        does not silently discard BY_COUNT progress or reset ROUND_ROBIN position.
+        """
+        all_proxies = list(proxies)
+        valid = [p for p in proxies if p.status == "valid"]
+        valid.sort(key=_quality_key)
+        with self._lock:
+            if self._valid and valid:
+                current_id = self._valid[self._index % len(self._valid)].id
+                try:
+                    new_index = next(i for i, p in enumerate(valid) if p.id == current_id)
+                except StopIteration:
+                    new_index = 0
+                    self._consecutive_success = 0
+            else:
+                new_index = 0
+                self._consecutive_success = 0
+            self._proxies = all_proxies
+            self._valid = valid
+            self._index = new_index
 
     def set_mode(self, mode: RotationMode, **params) -> None:
         with self._lock:
@@ -132,15 +160,22 @@ class ProxyRotator:
 
             if self._mode == RotationMode.FAILOVER:
                 if not success:
-                    self._index = (self._index + 1) % len(self._valid)
-                    self._consecutive_success = 0
-                    switched = True
+                    current = self._valid[self._index % len(self._valid)]
+                    if current.id == proxy_id:
+                        self._index = (self._index + 1) % len(self._valid)
+                        self._consecutive_success = 0
+                        switched = True
 
             elif self._mode == RotationMode.BY_COUNT:
                 threshold = self._params.get("threshold", 10)
                 if success:
-                    self._consecutive_success += 1
-                    _logger.debug("BY_COUNT: success %d/%d", self._consecutive_success, threshold)
+                    current = self._valid[self._index % len(self._valid)]
+                    if current.id == proxy_id:
+                        self._consecutive_success += 1
+                        _logger.debug(
+                            "BY_COUNT: success %d/%d",
+                            self._consecutive_success, threshold,
+                        )
                     if self._consecutive_success >= threshold:
                         old_idx = self._index
                         self._index = (self._index + 1) % len(self._valid)
@@ -148,16 +183,19 @@ class ProxyRotator:
                         switched = True
                         _logger.info("BY_COUNT: switched proxy %d -> %d", old_idx, self._index)
                 else:
-                    # On failure, switch immediately
-                    self._index = (self._index + 1) % len(self._valid)
-                    self._consecutive_success = 0
-                    switched = True
-                    _logger.debug("BY_COUNT: failed, switch and reset count")
+                    current = self._valid[self._index % len(self._valid)]
+                    if current.id == proxy_id:
+                        self._index = (self._index + 1) % len(self._valid)
+                        self._consecutive_success = 0
+                        switched = True
+                        _logger.debug("BY_COUNT: failed, switch and reset count")
 
             elif self._mode == RotationMode.BY_SCENE:
                 if not success:
-                    self._index = (self._index + 1) % len(self._valid)
-                    switched = True
+                    current = self._valid[self._index % len(self._valid)]
+                    if current.id == proxy_id:
+                        self._index = (self._index + 1) % len(self._valid)
+                        switched = True
 
             if switched:
                 return self._valid[self._index % len(self._valid)]

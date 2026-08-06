@@ -1,10 +1,13 @@
 from __future__ import annotations
+
 import asyncio
+
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
 class AsyncWorkerThread(QThread):
     error_occurred = pyqtSignal(str)
+    thread_done = pyqtSignal()  # always fired when run() exits, normal or cancelled
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -35,6 +38,7 @@ class AsyncWorkerThread(QThread):
             )
             self.loop.run_until_complete(self.loop.shutdown_asyncgens())
             self.loop.close()
+            self.thread_done.emit()
 
     def stop(self):
         if hasattr(self, "loop") and not self.loop.is_closed() and hasattr(self, "_main_task"):

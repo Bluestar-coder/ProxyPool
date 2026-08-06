@@ -24,7 +24,7 @@ SPEED_TEST_TIMEOUT_SECS = 20  # budget for one measure_speed() call (all fallbac
 
 
 async def _try_speed_urls(session: aiohttp.ClientSession, timeout: int) -> float:
-    req_timeout = aiohttp.ClientTimeout(total=timeout)
+    req_timeout = aiohttp.ClientTimeout(total=timeout, connect=10)
     for url in _SPEED_TEST_URLS:
         try:
             downloaded = 0
@@ -63,7 +63,9 @@ async def measure_speed(
     try:
         connector = ProxyConnector.from_url(proxy_url)
         client_timeout = aiohttp.ClientTimeout(total=timeout, connect=10)
-        async with aiohttp.ClientSession(connector=connector, timeout=client_timeout) as new_session:
+        async with aiohttp.ClientSession(
+            connector=connector, timeout=client_timeout
+        ) as new_session:
             return await _try_speed_urls(new_session, timeout)
     except Exception:
         return -1.0

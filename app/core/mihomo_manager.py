@@ -1,7 +1,8 @@
 import asyncio
 import gzip
-import os
+import hashlib
 import io
+import os
 import platform
 import socket
 import subprocess
@@ -70,9 +71,14 @@ async def ensure_binary(log_cb: Callable[[str], None] | None = None) -> bool:
 
     tag = release.get("tag_name", "")
     asset_name = _platform_asset_name(tag)
+    assets = release.get("assets", [])
     download_url = next(
-        (a["browser_download_url"] for a in release.get("assets", [])
-         if a["name"] == asset_name),
+        (a["browser_download_url"] for a in assets if a["name"] == asset_name),
+        None,
+    )
+    sha256_url = next(
+        (a["browser_download_url"] for a in assets
+         if a["name"] in (f"{asset_name}.sha256", f"{asset_name}.sha256sum")),
         None,
     )
 
@@ -91,6 +97,22 @@ async def ensure_binary(log_cb: Callable[[str], None] | None = None) -> bool:
     except Exception as e:
         _log(f"下载失败: {e}")
         return False
+
+    if sha256_url:
+        def _fetch_sha256():
+            with urlopen(sha256_url, timeout=15) as r:
+                return r.read().decode().split()[0].strip()
+
+        try:
+            expected = await loop.run_in_executor(None, _fetch_sha256)
+            actual = hashlib.sha256(content).hexdigest()
+            if actual != expected:
+                _log(f"SHA256 校验失败: expected={expected[:16]}... got={actual[:16]}...")
+                return False
+        except Exception as e:
+            _log(f"SHA256 校验跳过（获取校验文件失败: {e}）")
+    else:
+        _log("未找到 SHA256 校验文件，跳过校验")
 
     BINARY_DIR.mkdir(parents=True, exist_ok=True)
     try:

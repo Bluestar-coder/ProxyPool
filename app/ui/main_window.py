@@ -1,33 +1,50 @@
 from __future__ import annotations
+
 from datetime import datetime
-from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QComboBox, QSpinBox, QTableView,
-    QHeaderView, QAbstractItemView, QLineEdit, QTextEdit,
-    QSplitter, QStatusBar, QMessageBox, QMenuBar, QMenu,
-    QFrame, QTabWidget,
-)
+
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
-from app.config import Config, DB_PATH
-from app.db.database import Database
-from app.db.models import Proxy, ValidationResult
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QMenuBar,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+    QSplitter,
+    QStatusBar,
+    QTableView,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+from app.config import DB_PATH, Config
 from app.core.crawler_thread import CrawlerThread
 from app.core.http_proxy import HttpProxyThread
 from app.core.rest_api import RestApiThread
 from app.core.rotator import ProxyRotator, RotationMode
 from app.core.socks_server import SocksServerThread
+from app.core.subscription import SubscriptionThread
 from app.core.validator import ValidatorThread
-from app.ui.proxy_table import ProxyTableModel
-from app.ui.themes import THEMES, DEFAULT_THEME, build_stylesheet
+from app.db.database import Database
+from app.db.models import Proxy, ValidationResult
 from app.ui.dialogs.add_proxy import AddProxyDialog
-from app.ui.dialogs.batch_add import BatchAddDialog
 from app.ui.dialogs.auto_crawl import AutoCrawlDialog
+from app.ui.dialogs.batch_add import BatchAddDialog
 from app.ui.dialogs.batch_manage import BatchManageDialog
 from app.ui.dialogs.export_proxy import ExportDialog
 from app.ui.dialogs.subscription import SubscriptionDialog
-from app.core.subscription import SubscriptionThread
-
+from app.ui.proxy_table import ProxyTableModel
+from app.ui.themes import DEFAULT_THEME, THEMES, build_stylesheet
 
 _MODE_LABELS = [
     ("轮询", RotationMode.ROUND_ROBIN),
@@ -41,7 +58,7 @@ _MODE_LABELS = [
 
 _AUTO_MAINTENANCE_INTERVAL_MS = 5 * 60 * 1000
 _AUTO_REPLENISH_VALID_THRESHOLD = 50  # only auto-crawl when valid proxies drop below this
-_AUTO_REPLENISH_CRAWL_LIMIT = 100     # cap per-source crawl size for auto-replenish
+_AUTO_REPLENISH_CRAWL_LIMIT = 100  # cap per-source crawl size for auto-replenish
 
 
 class MainWindow(QMainWindow):
@@ -365,14 +382,14 @@ class MainWindow(QMainWindow):
             val.setObjectName(val_name)
             return lbl, val
 
-        self._stat_total_lbl,   self._stat_total   = _pair("总计", "statValue")
-        self._stat_valid_lbl,   self._stat_valid   = _pair("有效", "statValid")
+        self._stat_total_lbl, self._stat_total = _pair("总计", "statValue")
+        self._stat_valid_lbl, self._stat_valid = _pair("有效", "statValid")
         self._stat_invalid_lbl, self._stat_invalid = _pair("无效", "statInvalid")
         self._stat_unknown_lbl, self._stat_unknown = _pair("未知", "statUnknown")
 
         for lbl, val in [
-            (self._stat_total_lbl,   self._stat_total),
-            (self._stat_valid_lbl,   self._stat_valid),
+            (self._stat_total_lbl, self._stat_total),
+            (self._stat_valid_lbl, self._stat_valid),
             (self._stat_invalid_lbl, self._stat_invalid),
             (self._stat_unknown_lbl, self._stat_unknown),
         ]:
@@ -430,7 +447,9 @@ class MainWindow(QMainWindow):
             self._page_size_combo.addItem(f"{s} 条/页", s)
         self._btn_prev.clicked.connect(self._prev_page)
         self._btn_next.clicked.connect(self._next_page)
-        self._page_size_combo.currentIndexChanged.connect(self._refresh_table)
+        self._page_size_combo.currentIndexChanged.connect(
+            lambda: (self._page_label.setText("1"), self._refresh_table())
+        )
         row.addStretch()
         row.addWidget(self._btn_prev)
         row.addWidget(self._page_label)
@@ -442,6 +461,7 @@ class MainWindow(QMainWindow):
 
     def _apply_theme(self, name: str):
         from PyQt6.QtWidgets import QApplication
+
         app = QApplication.instance()
         if app:
             app.setStyleSheet(build_stylesheet(name))
@@ -472,7 +492,7 @@ class MainWindow(QMainWindow):
         proxies = self._db.get_all_proxies(page=page, page_size=size, region=region)
         total = self._db.count_proxies(region=region)
         self._model.load(proxies, total, page, size)
-        self._rotator.load_proxies(self._db.get_all_proxies(status="valid"))
+        self._rotator.update_proxies(self._db.get_all_proxies(status="valid"))
         cur = self._rotator.get_current()
         self._current_proxy_label.setText(
             f"当前代理: {cur.host}:{cur.port}" if cur else "当前代理: -"
@@ -491,8 +511,8 @@ class MainWindow(QMainWindow):
         self._sub_model.load(proxies, count, 1, count or 1)
 
     def _refresh_stats(self):
-        total   = self._db.count_proxies()
-        valid   = self._db.count_proxies(status="valid")
+        total = self._db.count_proxies()
+        valid = self._db.count_proxies(status="valid")
         invalid = self._db.count_proxies(status="invalid")
         unknown = total - valid - invalid
         self._stat_total.setText(str(total))
@@ -507,7 +527,8 @@ class MainWindow(QMainWindow):
 
     def _next_page(self):
         size = self._current_page_size()
-        total = self._db.count_proxies()
+        region = self._region_filter.currentData()
+        total = self._db.count_proxies(region=region)
         max_page = max(1, (total + size - 1) // size)
         p = min(max_page, self._current_page() + 1)
         self._page_label.setText(str(p))
@@ -526,19 +547,13 @@ class MainWindow(QMainWindow):
             "font-size: 12px; padding: 0 6px; }"
         ) % (colors["bg"], colors["border"])
         if state == "running":
-            self._status_bar.showMessage(
-                f"  running   socks5://127.0.0.1:{port}", 0
-            )
+            self._status_bar.showMessage(f"  running   socks5://127.0.0.1:{port}", 0)
             text_color = colors["success"]
         elif state == "no_upstream":
-            self._status_bar.showMessage(
-                f"  warning   socks5://127.0.0.1:{port}  (no upstream)", 0
-            )
+            self._status_bar.showMessage(f"  warning   socks5://127.0.0.1:{port}  (no upstream)", 0)
             text_color = colors["warning"]
         else:
-            self._status_bar.showMessage(
-                f"  stopped   socks5://127.0.0.1:{port}", 0
-            )
+            self._status_bar.showMessage(f"  stopped   socks5://127.0.0.1:{port}", 0)
             text_color = colors["fg_dim"]
         self._status_bar.setStyleSheet(base + "QStatusBar { color: %s; }" % text_color)
 
@@ -556,19 +571,13 @@ class MainWindow(QMainWindow):
         self._sync_rotation_mode()
         self._socks_thread = SocksServerThread(self._rotator, self._config.listen_port)
         self._socks_thread.status_changed.connect(self._update_status)
-        self._socks_thread.client_connected.connect(
-            lambda s: self._log_event(f"[连接] {s}")
-        )
+        self._socks_thread.client_connected.connect(lambda s: self._log_event(f"[连接] {s}"))
         self._socks_thread.proxy_switched.connect(self._on_proxy_switched)
         self._socks_thread.start()
-        self._rest_api_thread = RestApiThread(
-            self._rotator, self._db, self._config.rest_api_port
-        )
+        self._rest_api_thread = RestApiThread(self._rotator, self._db, self._config.rest_api_port)
         self._rest_api_thread.refresh_requested.connect(self._on_validate)
         self._rest_api_thread.start()
-        self._http_proxy_thread = HttpProxyThread(
-            self._rotator, self._config.http_proxy_port
-        )
+        self._http_proxy_thread = HttpProxyThread(self._rotator, self._config.http_proxy_port)
         self._http_proxy_thread.start()
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
@@ -586,9 +595,11 @@ class MainWindow(QMainWindow):
             self._socks_thread = None
         if self._rest_api_thread:
             self._rest_api_thread.stop()
+            self._rest_api_thread.wait(3000)
             self._rest_api_thread = None
         if self._http_proxy_thread:
             self._http_proxy_thread.stop()
+            self._http_proxy_thread.wait(3000)
             self._http_proxy_thread = None
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
@@ -635,9 +646,12 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             p = dlg.get_proxy()
             if p:
-                self._db.upsert_proxy(p)
+                proxy_id = self._db.upsert_proxy(p)
                 self._log_event(f"[添加] {p.host}:{p.port}")
                 self._refresh_table()
+                if dlg.should_validate():
+                    p.id = proxy_id
+                    self._start_validation([p], f"[验证] 立即验证 {p.host}:{p.port}")
 
     def _on_add_batch(self):
         dlg = BatchAddDialog(self)
@@ -669,8 +683,7 @@ class MainWindow(QMainWindow):
 
     def _on_crawl_finished(self, candidates: list):
         proxies = [
-            Proxy(host=c.host, port=c.port, type=c.type,
-                  username=c.username, source=c.source)
+            Proxy(host=c.host, port=c.port, type=c.type, username=c.username, source=c.source)
             for c in candidates
         ]
         self._db.upsert_proxies(proxies)
@@ -698,6 +711,7 @@ class MainWindow(QMainWindow):
 
     def _on_subscription_finished(self, proxies: list):
         self._db.upsert_proxies(proxies)
+        self._page_label.setText("1")
         self._refresh_table()
         self._refresh_sub_table()
 
@@ -713,7 +727,9 @@ class MainWindow(QMainWindow):
     def _on_validate_stop(self) -> None:
         if self._validator_thread and self._validator_thread.isRunning():
             self._validator_thread.stop()
-        self._set_validator_state("idle")
+            self._btn_validate_stop.setEnabled(False)
+        else:
+            self._set_validator_state("idle")
 
     def _start_validation(self, proxies: list, label: str) -> None:
         if self._validator_thread and self._validator_thread.isRunning():
@@ -733,6 +749,9 @@ class MainWindow(QMainWindow):
         )
         self._validator_thread.regions_ready.connect(self._on_regions_ready)
         self._validator_thread.finished.connect(self._on_validation_finished)
+        self._validator_thread.thread_done.connect(
+            lambda: self._set_validator_state("idle")
+        )
         self._validator_thread.start()
         self._set_validator_state("running")
         self._log_event(label)
@@ -801,7 +820,7 @@ class MainWindow(QMainWindow):
             self._validator_thread.finished.connect(self._on_auto_maintenance_validation_done)
 
     def _on_auto_maintenance_validation_done(self):
-        invalid = [p for p in self._db.get_all_proxies() if p.status == "invalid"]
+        invalid = self._db.get_all_proxies(status="invalid")
         if invalid:
             self._db.delete_proxies([p.id for p in invalid])
             self._log_event(f"[自动维护] 已删除 {len(invalid)} 个失效代理")
@@ -814,14 +833,21 @@ class MainWindow(QMainWindow):
 
         config = self._db.load_auto_crawl_config()
         if not config:
-            self._log_event("[自动维护] 尚未配置过自动爬取来源，跳过补充（可先手动打开一次'自动爬取'对话框并确认配置）")
+            self._log_event(
+                "[自动维护] 尚未配置过自动爬取来源，"
+                "跳过补充（可先手动打开一次'自动爬取'对话框并确认配置）"
+            )
             return
 
         capped_config = {
-            "fofa": {**config.get("fofa", {}),
-                     "limit": min(config.get("fofa", {}).get("limit", 0), _AUTO_REPLENISH_CRAWL_LIMIT)},
-            "free": {**config.get("free", {}),
-                     "limit": min(config.get("free", {}).get("limit", 0), _AUTO_REPLENISH_CRAWL_LIMIT)},
+            "fofa": {
+                **config.get("fofa", {}),
+                "limit": min(config.get("fofa", {}).get("limit", 0), _AUTO_REPLENISH_CRAWL_LIMIT),
+            },
+            "free": {
+                **config.get("free", {}),
+                "limit": min(config.get("free", {}).get("limit", 0), _AUTO_REPLENISH_CRAWL_LIMIT),
+            },
         }
 
         self._crawler_thread = CrawlerThread(capped_config)
@@ -831,12 +857,11 @@ class MainWindow(QMainWindow):
         self._crawler_thread.log.connect(self._log_event)
         self._crawler_thread.finished.connect(self._on_crawl_finished)
         self._crawler_thread.finished.connect(lambda: self._log_event("[自动维护] 本轮完成"))
-        self._crawler_thread.error_occurred.connect(
-            lambda e: self._log_event(f"[爬取] 错误: {e}")
-        )
+        self._crawler_thread.error_occurred.connect(lambda e: self._log_event(f"[爬取] 错误: {e}"))
         self._crawler_thread.start()
         self._log_event(
-            f"[自动维护] 有效代理仅 {valid_count} 个，开始补充爬取（单次上限 {_AUTO_REPLENISH_CRAWL_LIMIT}）..."
+            f"[自动维护] 有效代理仅 {valid_count} 个，"
+            f"开始补充爬取（单次上限 {_AUTO_REPLENISH_CRAWL_LIMIT}）..."
         )
 
     def _on_speed_test(self):
@@ -858,13 +883,14 @@ class MainWindow(QMainWindow):
     def _on_speed_stop(self) -> None:
         if self._speed_thread and self._speed_thread.isRunning():
             self._speed_thread.stop()
-        self._set_speed_state("idle")
+            self._btn_speed_stop.setEnabled(False)
+        else:
+            self._set_speed_state("idle")
 
     def _speed_test_selected(self, proxy_ids: list[int]):
         if not proxy_ids:
             return
-        id_set = set(proxy_ids)
-        proxies = [p for p in self._db.get_all_proxies() if p.id in id_set]
+        proxies = self._db.get_all_proxies(ids=proxy_ids)
         if not proxies:
             return
         self._start_speed_test(proxies, f"[测速] 开始测速选中 {len(proxies)} 个代理")
@@ -874,6 +900,7 @@ class MainWindow(QMainWindow):
             self._log_event("[测速] 测速正在进行中，请等待完成")
             return
         from app.core.speed_test import SpeedTestThread
+
         self._speed_thread = SpeedTestThread(
             proxies=proxies,
             concurrency=min(20, self._config.validator_concurrency),
@@ -883,6 +910,9 @@ class MainWindow(QMainWindow):
             lambda done, total: self._log_event(f"[测速] {done}/{total}")
         )
         self._speed_thread.finished.connect(self._on_speed_finished)
+        self._speed_thread.thread_done.connect(
+            lambda: self._set_speed_state("idle")
+        )
         self._speed_thread.start()
         self._set_speed_state("running")
         self._log_event(label)
@@ -900,10 +930,7 @@ class MainWindow(QMainWindow):
 
     def _selected_proxy_ids(self) -> list[int]:
         selected_rows = sorted(set(i.row() for i in self._table.selectedIndexes()))
-        return [
-            p.id for row in selected_rows
-            if (p := self._model.get_proxy(row)) is not None
-        ]
+        return [p.id for row in selected_rows if (p := self._model.get_proxy(row)) is not None]
 
     def _on_table_context_menu(self, pos):
         index = self._table.indexAt(pos)
@@ -937,10 +964,7 @@ class MainWindow(QMainWindow):
 
     def _selected_sub_proxy_ids(self) -> list[int]:
         selected_rows = sorted(set(i.row() for i in self._sub_table.selectedIndexes()))
-        return [
-            p.id for row in selected_rows
-            if (p := self._sub_model.get_proxy(row)) is not None
-        ]
+        return [p.id for row in selected_rows if (p := self._sub_model.get_proxy(row)) is not None]
 
     def _on_sub_table_context_menu(self, pos):
         index = self._sub_table.indexAt(pos)
@@ -972,12 +996,12 @@ class MainWindow(QMainWindow):
             self._copy_selected_addresses(selected_ids)
 
     def _copy_selected_addresses(self, proxy_ids: list[int]):
-        id_set = set(proxy_ids)
-        proxies = [p for p in self._db.get_all_proxies() if p.id in id_set]
+        proxies = self._db.get_all_proxies(ids=proxy_ids)
         if not proxies:
             return
         text = "\n".join(p.url for p in proxies)
         from PyQt6.QtWidgets import QApplication
+
         clipboard = QApplication.clipboard()
         if clipboard:
             clipboard.setText(text)
@@ -1000,7 +1024,7 @@ class MainWindow(QMainWindow):
         self._refresh_table()
 
     def _delete_invalid(self):
-        invalid = [p for p in self._db.get_all_proxies() if p.status == "invalid"]
+        invalid = self._db.get_all_proxies(status="invalid")
         self._db.delete_proxies([p.id for p in invalid])
         self._log_event(f"[管理] 删除 {len(invalid)} 个无效代理")
         self._refresh_table()
@@ -1015,8 +1039,7 @@ class MainWindow(QMainWindow):
     def _validate_selected(self, proxy_ids: list[int]):
         if not proxy_ids:
             return
-        id_set = set(proxy_ids)
-        proxies = [p for p in self._db.get_all_proxies() if p.id in id_set]
+        proxies = self._db.get_all_proxies(ids=proxy_ids)
         if not proxies:
             return
         self._start_validation(proxies, f"[验证] 开始验证选中 {len(proxies)} 个代理")
@@ -1031,9 +1054,15 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._auto_maintenance_timer.stop()
         self._on_stop()
-        for thread in (self._socks_thread, self._rest_api_thread, self._http_proxy_thread,
-                       self._crawler_thread, self._validator_thread, self._speed_thread,
-                       self._subscription_thread):
+        for thread in (
+            self._socks_thread,
+            self._rest_api_thread,
+            self._http_proxy_thread,
+            self._crawler_thread,
+            self._validator_thread,
+            self._speed_thread,
+            self._subscription_thread,
+        ):
             if thread and thread.isRunning():
                 thread.stop() if hasattr(thread, "stop") else None
                 thread.wait(3000)

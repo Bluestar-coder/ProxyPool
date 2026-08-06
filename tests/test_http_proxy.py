@@ -1,8 +1,9 @@
 import asyncio
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.core.http_proxy import _handle, _BAD_GATEWAY, _SERVICE_UNAVAILABLE
+import pytest
+
+from app.core.http_proxy import _BAD_GATEWAY, _SERVICE_UNAVAILABLE, _handle
 
 
 def _make_reader(data: bytes) -> asyncio.StreamReader:
@@ -35,6 +36,7 @@ def _make_rotator(endpoint=None):
     ep = endpoint or MagicMock(proxy_id=1, url="socks5://127.0.0.1:1080", supports_rdns=True)
     r.on_request_start = AsyncMock(return_value=ep)
     r.on_request_done = AsyncMock(return_value=None)
+    r.on_response_body = AsyncMock(return_value=None)
     return r, ep
 
 

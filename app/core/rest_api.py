@@ -130,6 +130,4 @@ class RestApiThread(QThread):
 
     def stop(self):  # pragma: no cover
         self.requestInterruption()
-        if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
         self.wait(3000)

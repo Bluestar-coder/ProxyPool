@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json as _json
+import logging
 import re
+import threading
 import time
 
 import aiohttp
@@ -10,12 +12,15 @@ from aiohttp_socks import ProxyConnector
 from opencc import OpenCC
 from PyQt6.QtCore import pyqtSignal
 
+from app.core.speed_test import SPEED_TEST_TIMEOUT_SECS, measure_speed
 from app.core.worker_thread import AsyncWorkerThread
-from app.core.speed_test import measure_speed, SPEED_TEST_TIMEOUT_SECS
 from app.db.models import Proxy, ValidationResult
 
+_logger = logging.getLogger(__name__)
 _region_cache: dict[str, tuple[str, float]] = {}
+_region_cache_lock = threading.Lock()
 _REGION_TTL = 3600.0
+_REGION_CACHE_MAX = 10_000
 _IP_API_BATCH = 100  # ip-api.com free-tier limit per request
 _t2s = OpenCC("t2s")  # Traditional to Simplified Chinese
 
@@ -44,13 +49,21 @@ async def _batch_region_lookup(ips: list[str]) -> dict[str, str]:
     results: dict[str, str] = {}
     now = time.monotonic()
 
-    uncached: list[str] = []
-    for ip in ips:
-        cached_val, cached_ts = _region_cache.get(ip, ("", 0.0))
-        if cached_val and (now - cached_ts) < _REGION_TTL:
-            results[ip] = cached_val
-        else:
-            uncached.append(ip)
+    with _region_cache_lock:
+        uncached: list[str] = []
+        for ip in ips:
+            cached_val, cached_ts = _region_cache.get(ip, ("", 0.0))
+            if cached_val and (now - cached_ts) < _REGION_TTL:
+                results[ip] = cached_val
+            else:
+                uncached.append(ip)
+                _region_cache.pop(ip, None)  # evict expired / missing entries
+
+        # Keep the cache bounded by evicting oldest entries when over the limit
+        if len(_region_cache) > _REGION_CACHE_MAX:
+            oldest = sorted(_region_cache, key=lambda k: _region_cache[k][1])
+            for k in oldest[: len(_region_cache) - _REGION_CACHE_MAX]:
+                del _region_cache[k]
 
     if not uncached:
         return results
@@ -68,8 +81,17 @@ async def _batch_region_lookup(ips: list[str]) -> dict[str, str]:
                     json=payload,
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
+                    if resp.status != 200:
+                        _logger.warning(
+                            "ip-api.com batch returned HTTP %d; skipping batch", resp.status
+                        )
+                        for ip in batch:
+                            results[ip] = ""
+                        continue
                     data = await resp.json()
                 fetch_time = time.monotonic()
+                # CPU work (OpenCC conversion) outside the lock
+                batch_results: dict[str, str] = {}
                 for item in data:
                     ip = item.get("query", "")
                     if not ip:
@@ -77,9 +99,11 @@ async def _batch_region_lookup(ips: list[str]) -> dict[str, str]:
                     country = item.get("country", "")
                     region_name = item.get("regionName", "")
                     region = " ".join(filter(None, [country, region_name]))
-                    region = _t2s.convert(region)  # Convert to simplified Chinese
-                    _region_cache[ip] = (region, fetch_time)
-                    results[ip] = region
+                    batch_results[ip] = _t2s.convert(region)
+                with _region_cache_lock:
+                    for ip, region in batch_results.items():
+                        _region_cache[ip] = (region, fetch_time)
+                        results[ip] = region
             except Exception:
                 for ip in batch:
                     results[ip] = ""
@@ -93,9 +117,13 @@ def _extract_ip(data: dict) -> str:
 
 
 def _detect_anonymity(response_ip: str, proxy_ip: str, local_ip: str) -> str:
-    if local_ip and local_ip in response_ip:
+    def _exact_ip_in(needle: str, haystack: str) -> bool:
+        # Word-boundary match so "1.1.1.1" doesn't match inside "21.1.1.1"
+        return bool(re.search(r"(?<![.\d])" + re.escape(needle) + r"(?![.\d])", haystack))
+
+    if local_ip and _exact_ip_in(local_ip, response_ip):
         return "transparent"
-    if proxy_ip and proxy_ip in response_ip:
+    if proxy_ip and _exact_ip_in(proxy_ip, response_ip):
         return "medium"
     return "high"
 

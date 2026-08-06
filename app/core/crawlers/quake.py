@@ -51,9 +51,12 @@ class QuakeCrawler(BaseCrawler):
         if code != 0:
             msg = data.get("message", "")
             logger.warning("Quake error (key=***): code=%s %s", code, msg)
-            raise QuotaExhausted(msg)
+            _QUOTA_EXHAUSTED_CODES = {40300, 40301}
+            if code in _QUOTA_EXHAUSTED_CODES:
+                raise QuotaExhausted(msg)
+            raise RuntimeError(f"Quake error {code}: {msg}")
 
-        records: list[dict] = data.get("data", [])
+        records: list[dict] = data.get("data") or []
         items = [
             ProxyCandidate(
                 host=r["ip"],

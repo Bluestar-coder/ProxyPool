@@ -1,11 +1,20 @@
 from __future__ import annotations
+
 import csv
 import json
 from pathlib import Path
+
+import yaml
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QComboBox, QCheckBox,
-    QDialogButtonBox, QLabel, QFileDialog,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QLabel,
+    QVBoxLayout,
 )
+
 from app.db.models import Proxy
 
 
@@ -45,7 +54,12 @@ class ExportDialog(QDialog):
             proxies = [p for p in proxies if p.status == "valid"]
         redact = self._redact.isChecked()
         fmt = self._fmt.currentText()
-        _write(Path(path), proxies, fmt, redact)
+        try:
+            _write(Path(path), proxies, fmt, redact)
+        except Exception as exc:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "导出失败", f"无法写入文件：{exc}")
+            return
         self.accept()
 
 
@@ -82,31 +96,41 @@ def _write(path: Path, proxies: list[Proxy], fmt: str, redact: bool):
 
 def _proxy_name(p: Proxy, idx: int) -> str:
     region = f"-{p.region}" if p.region else ""
-    return f"SOCKS5{region}-{p.host}:{p.port}"
+    return f"{p.type.upper()}{region}-{p.host}:{p.port}-{idx}"
 
 
 def _to_clash_yaml(proxies: list[Proxy], redact: bool) -> str:
-    lines = ["proxies:"]
+    proxy_list = []
     for i, p in enumerate(proxies):
-        name = _proxy_name(p, i)
         pwd = "***" if redact else p.password
-        lines.append(f'  - name: "{name}"')
-        lines.append(f"    type: socks5")
-        lines.append(f"    server: {p.host}")
-        lines.append(f"    port: {p.port}")
+        entry: dict = {
+            "name": _proxy_name(p, i),
+            "type": p.type,
+            "server": p.host,
+            "port": p.port,
+        }
         if p.username:
-            lines.append(f"    username: {p.username}")
-            lines.append(f"    password: {pwd}")
-    return "\n".join(lines) + "\n"
+            entry["username"] = p.username
+            entry["password"] = pwd
+        proxy_list.append(entry)
+    return yaml.dump({"proxies": proxy_list}, allow_unicode=True, default_flow_style=False)
 
 
 def _to_surge_conf(proxies: list[Proxy], redact: bool) -> str:
     lines = ["[Proxy]"]
+    skipped = 0
     for i, p in enumerate(proxies):
         name = _proxy_name(p, i)
         pwd = "***" if redact else p.password
+        if "," in name or "," in p.host or "," in p.username or "," in pwd:
+            skipped += 1
+            continue
         if p.username:
-            lines.append(f"{name} = socks5, {p.host}, {p.port}, {p.username}, {pwd}")
+            lines.append(f"{name} = {p.type}, {p.host}, {p.port}, {p.username}, {pwd}")
         else:
-            lines.append(f"{name} = socks5, {p.host}, {p.port}")
+            lines.append(f"{name} = {p.type}, {p.host}, {p.port}")
+    if skipped:
+        lines.append(
+            f"# {skipped} proxies skipped (credentials contain commas, unsupported by Surge format)"
+        )
     return "\n".join(lines) + "\n"

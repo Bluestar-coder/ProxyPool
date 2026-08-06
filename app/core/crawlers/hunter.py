@@ -62,7 +62,7 @@ class HunterCrawler(BaseCrawler):
             logger.warning("Hunter error (key=***): code=%s %s", code, msg)
             raise RuntimeError(f"Hunter error {code}: {msg}")
 
-        arr: list[dict] = data.get("data", {}).get("arr", [])
+        arr: list[dict] = (data.get("data") or {}).get("arr", [])
         items = [
             ProxyCandidate(
                 host=r["ip"],

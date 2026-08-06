@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
+from urllib.parse import quote as _url_quote
 
 
 @dataclass
@@ -25,13 +27,16 @@ class Proxy:
     @property
     def url(self) -> str:
         if self.username:
-            return f"{self.type}://{self.username}:{self.password}@{self.host}:{self.port}"
+            u = _url_quote(self.username, safe="")
+            p = _url_quote(self.password, safe="")
+            return f"{self.type}://{u}:{p}@{self.host}:{self.port}"
         return f"{self.type}://{self.host}:{self.port}"
 
     @property
     def redacted_url(self) -> str:
         if self.username:
-            return f"{self.type}://{self.username}:***@{self.host}:{self.port}"
+            u = _url_quote(self.username, safe="")
+            return f"{self.type}://{u}:***@{self.host}:{self.port}"
         return f"{self.type}://{self.host}:{self.port}"
 
 

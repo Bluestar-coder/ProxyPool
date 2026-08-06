@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt
+
 from app.db.models import Proxy
 
 COLUMNS = ["#", "Host", "Port", "类型", "地区", "延时(ms)", "速度(KB/s)", "状态", "匿名性", "操作"]
@@ -47,9 +49,12 @@ class ProxyTableModel(QAbstractTableModel):
             offset = (self._page - 1) * self._page_size
             values = [
                 offset + index.row() + 1,
-                p.host, p.port, p.type, p.region or "-",
-                f"{p.latency:.0f}" if p.latency >= 0 else "-",
-                f"{p.speed:.0f}" if p.speed >= 0 else "-",
+                p.host,
+                p.port,
+                p.type,
+                p.region or "-",
+                f"{p.latency:.0f}" if p.latency is not None and p.latency >= 0 else "-",
+                f"{p.speed:.0f}" if p.speed is not None and p.speed >= 0 else "-",
                 _STATUS_DISPLAY.get(p.status, p.status),
                 _ANON_DISPLAY.get(p.anonymity, p.anonymity or "-"),
                 "",  # 操作列由 delegate 处理
@@ -69,7 +74,7 @@ class ProxyTableModel(QAbstractTableModel):
         return None
 
     def update_row(self, proxy_id: int, **fields) -> bool:
-        """Update proxy fields in-place and notify the view. Returns True if found on current page."""
+        """Update proxy fields in-place and notify view. Returns True if found on current page."""
         for row, proxy in enumerate(self._proxies):
             if proxy.id == proxy_id:
                 for key, value in fields.items():
@@ -95,9 +100,9 @@ class ProxyTableModel(QAbstractTableModel):
             2: lambda p: p.port,
             3: lambda p: p.type,
             4: lambda p: p.region or "",
-            5: lambda p: p.latency if p.latency >= 0 else untested,
-            6: lambda p: p.speed if p.speed >= 0 else untested,
-            7: lambda p: (0 if p.status == "valid" else 1 if p.status == "invalid" else 2),
+            5: lambda p: p.latency if p.latency is not None and p.latency >= 0 else untested,
+            6: lambda p: p.speed if p.speed is not None and p.speed >= 0 else untested,
+            7: lambda p: 0 if p.status == "valid" else 1 if p.status == "invalid" else 2,
             8: lambda p: p.anonymity or "",
         }
         if column in key_funcs:

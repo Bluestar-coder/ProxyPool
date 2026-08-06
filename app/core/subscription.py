@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import json
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -26,20 +27,16 @@ _CLASH_UA = "ClashMeta/1.18.0"
 async def _fetch_url(url: str) -> str:
     """Fetch a subscription URL. Handles http/https and file://."""
     if url.startswith("file://"):
+        def _read_file(u: str) -> str:
+            with urlopen(u, timeout=20) as f:
+                return f.read().decode("utf-8", errors="replace")
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None,
-            lambda u=url: urlopen(u, timeout=20).read().decode("utf-8", errors="replace"),
-        )
+        return await loop.run_in_executor(None, _read_file, url)
     headers = {
         "User-Agent": _CLASH_UA,
         "Accept": "application/yaml,text/plain,*/*",
     }
-    # ssl=False: subscription providers are content servers; we don't post
-    # credentials (auth token is already in the URL query string supplied by user)
-    connector = aiohttp.TCPConnector(ssl=False)
     async with aiohttp.ClientSession(
-        connector=connector,
         headers=headers,
         timeout=aiohttp.ClientTimeout(total=20),
     ) as session:
@@ -88,6 +85,14 @@ def _username_for(config: dict) -> str:
     return config.get("username", "")
 
 
+def _password_for(config: dict) -> str:
+    t = config.get("type", "")
+    # vmess/trojan/ss store their auth credential as username; no separate password
+    if t in ("vmess", "trojan", "ss"):
+        return ""
+    return config.get("password", "")
+
+
 @dataclass
 class SubscriptionResult:
     name: str
@@ -126,7 +131,6 @@ async def test_proxies(
                     None,
                     lambda: urlopen(url, timeout=(_DELAY_TIMEOUT_MS / 1000) + 2).read(),
                 )
-                import json
                 data = json.loads(resp_bytes)
                 latency_ms = float(data.get("delay", -1))
                 success = latency_ms > 0
@@ -146,8 +150,24 @@ async def test_proxies(
         )
 
     tasks = [_test_one(cfg) for cfg in configs]
-    results = await asyncio.gather(*tasks)
-    return list(results)
+    raw = await asyncio.gather(*tasks, return_exceptions=True)
+    # Keep a result for every config (same index), turning exceptions into failed results
+    # so that zip(all_configs, results) in the caller stays correctly aligned.
+    results: list[SubscriptionResult] = []
+    for i, r in enumerate(raw):
+        if isinstance(r, SubscriptionResult):
+            results.append(r)
+        else:
+            cfg = configs[i]
+            results.append(SubscriptionResult(
+                name=cfg.get("name", ""),
+                host=cfg.get("server", ""),
+                port=int(cfg.get("port") or 0),
+                proxy_type=cfg.get("type", ""),
+                latency_ms=-1.0,
+                success=False,
+            ))
+    return results
 
 
 def _build_mihomo_config(configs: list[dict], api_port: int) -> dict:
@@ -252,13 +272,12 @@ class SubscriptionThread(AsyncWorkerThread):
         # --- Convert to Proxy objects ---
         proxies: list[Proxy] = []
         for cfg, result in zip(all_configs, results):
-            username = _username_for(cfg)
             proxies.append(Proxy(
                 host=result.host,
                 port=result.port,
                 type=result.proxy_type,
-                username=username,
-                password="",
+                username=_username_for(cfg),
+                password=_password_for(cfg),
                 latency=result.latency_ms,
                 status="valid" if result.success else "invalid",
                 source="subscription",

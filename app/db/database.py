@@ -30,7 +30,12 @@ def _row_to_proxy(row: sqlite3.Row) -> Proxy:
     host, port, type_, username = row["host"], row["port"], row["type"], row["username"]
     password = ""
     if username:
-        password = keyring.get_password(_KEYRING_SERVICE, _keyring_key(host, port, type_, username)) or ""
+        _key = _keyring_key(host, port, type_, username)
+        try:
+            password = keyring.get_password(_KEYRING_SERVICE, _key) or ""
+        except keyring.errors.KeyringError as exc:
+            _logger.warning("Keyring read failed for %s:%d: %s", host, port, exc)
+            password = ""
     return Proxy(
         id=row["id"],
         host=host,
@@ -179,23 +184,32 @@ class Database:
     def upsert_proxy(self, p: Proxy) -> int:
         assert self._conn is not None
         now = _now_iso()
+        # Keyring write is external; keep it outside the SQL lock so a keyring
+        # failure doesn't prevent the proxy from being written to SQLite.
+        if p.username and p.password:
+            try:
+                keyring.set_password(
+                    _KEYRING_SERVICE,
+                    _keyring_key(p.host, p.port, p.type, p.username),
+                    p.password,
+                )
+            except keyring.errors.KeyringError as exc:
+                _logger.warning("Keyring write failed for %s:%s: %s", p.host, p.port, exc)
         with self._write_lock:
-            # Store password in keyring before the SQL write; SQLite column stays empty.
-            if p.username and p.password:
-                keyring.set_password(_KEYRING_SERVICE, _keyring_key(p.host, p.port, p.type, p.username), p.password)
             cur = self._conn.execute(
                 """
                 INSERT INTO proxies(
                     host, port, type, username, password, region,
-                    latency, status, anonymity, supports_rdns, auth_required,
+                    latency, speed, status, anonymity, supports_rdns, auth_required,
                     use_count, fail_count, consecutive_failures, source, updated_at
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(host, port, type, username) DO UPDATE SET
-                    region               = CASE WHEN excluded.region     != ''       THEN excluded.region     ELSE region     END,
-                    latency              = CASE WHEN excluded.latency    != -1       THEN excluded.latency    ELSE latency    END,
-                    status               = CASE WHEN excluded.status     != 'unknown' THEN excluded.status    ELSE status     END,
-                    anonymity            = CASE WHEN excluded.anonymity  != ''       THEN excluded.anonymity  ELSE anonymity  END,
+                    region    = COALESCE(NULLIF(excluded.region, ''), region),
+                    latency   = COALESCE(NULLIF(excluded.latency, -1), latency),
+                    speed     = COALESCE(NULLIF(excluded.speed, -1), speed),
+                    status    = COALESCE(NULLIF(excluded.status, 'unknown'), status),
+                    anonymity = COALESCE(NULLIF(excluded.anonymity, ''), anonymity),
                     supports_rdns        = excluded.supports_rdns,
                     auth_required        = excluded.auth_required,
                     use_count            = MAX(use_count, excluded.use_count),
@@ -206,7 +220,7 @@ class Database:
                 """,
                 (
                     p.host, p.port, p.type, p.username, "", p.region,
-                    p.latency, p.status, p.anonymity,
+                    p.latency, p.speed, p.status, p.anonymity,
                     int(p.supports_rdns), int(p.auth_required),
                     p.use_count, p.fail_count, p.consecutive_failures,
                     p.source, now,
@@ -223,8 +237,58 @@ class Database:
             return row["id"] if row else 0
 
     def upsert_proxies(self, proxies: list[Proxy]) -> None:
+        if not proxies:
+            return
+        assert self._conn is not None
+        now = _now_iso()
+        # Keyring writes are external and happen outside the SQL transaction.
+        # Each write is isolated so a single failure doesn't abort the batch.
         for p in proxies:
-            self.upsert_proxy(p)
+            if p.username and p.password:
+                try:
+                    keyring.set_password(
+                        _KEYRING_SERVICE,
+                        _keyring_key(p.host, p.port, p.type, p.username),
+                        p.password,
+                    )
+                except keyring.errors.KeyringError as exc:
+                    _logger.warning(
+                        "Keyring write failed for %s:%s: %s", p.host, p.port, exc
+                    )
+        # Single transaction for all rows
+        with self._write_lock:
+            for p in proxies:
+                self._conn.execute(
+                    """
+                    INSERT INTO proxies(
+                        host, port, type, username, password, region,
+                        latency, speed, status, anonymity, supports_rdns, auth_required,
+                        use_count, fail_count, consecutive_failures, source, updated_at
+                    )
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(host, port, type, username) DO UPDATE SET
+                        region    = COALESCE(NULLIF(excluded.region, ''), region),
+                        latency   = COALESCE(NULLIF(excluded.latency, -1), latency),
+                        speed     = COALESCE(NULLIF(excluded.speed, -1), speed),
+                        status    = COALESCE(NULLIF(excluded.status, 'unknown'), status),
+                        anonymity = COALESCE(NULLIF(excluded.anonymity, ''), anonymity),
+                        supports_rdns        = excluded.supports_rdns,
+                        auth_required        = excluded.auth_required,
+                        use_count            = MAX(use_count, excluded.use_count),
+                        fail_count           = MAX(fail_count, excluded.fail_count),
+                        consecutive_failures = excluded.consecutive_failures,
+                        source               = excluded.source,
+                        updated_at           = excluded.updated_at
+                    """,
+                    (
+                        p.host, p.port, p.type, p.username, "", p.region,
+                        p.latency, p.speed, p.status, p.anonymity,
+                        int(p.supports_rdns), int(p.auth_required),
+                        p.use_count, p.fail_count, p.consecutive_failures,
+                        p.source, now,
+                    ),
+                )
+            self._conn.commit()
 
     def get_all_proxies(
         self,
@@ -233,8 +297,11 @@ class Database:
         source: str | None = None,
         page: int = 1,
         page_size: int = 0,
+        ids: list[int] | None = None,
     ) -> list[Proxy]:
         assert self._conn is not None
+        if ids is not None and not ids:
+            return []
         conditions: list[str] = []
         params: list = []
         if status is not None:
@@ -246,10 +313,14 @@ class Database:
         if source is not None:
             conditions.append("source=?")
             params.append(source)
+        if ids is not None:
+            placeholders = ",".join("?" * len(ids))
+            conditions.append(f"id IN ({placeholders})")
+            params.extend(ids)
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = f"SELECT * FROM proxies{where} ORDER BY id"
         if page_size > 0:
-            offset = (page - 1) * page_size
+            offset = (max(1, page) - 1) * page_size
             sql += f" LIMIT {page_size} OFFSET {offset}"
         rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_proxy(r) for r in rows]
@@ -293,10 +364,10 @@ class Database:
 
     def delete_proxy(self, proxy_id: int) -> None:
         assert self._conn is not None
-        row = self._conn.execute(
-            "SELECT host, port, type, username FROM proxies WHERE id=?", (proxy_id,)
-        ).fetchone()
         with self._write_lock:
+            row = self._conn.execute(
+                "SELECT host, port, type, username FROM proxies WHERE id=?", (proxy_id,)
+            ).fetchone()
             self._conn.execute("DELETE FROM proxies WHERE id=?", (proxy_id,))
             self._conn.commit()
         if row and row["username"]:
@@ -305,7 +376,7 @@ class Database:
                     _KEYRING_SERVICE,
                     _keyring_key(row["host"], row["port"], row["type"], row["username"]),
                 )
-            except keyring.errors.PasswordDeleteError:
+            except keyring.errors.KeyringError:
                 pass
 
     def delete_proxies(self, proxy_ids: list[int]) -> None:
@@ -313,11 +384,11 @@ class Database:
         if not proxy_ids:
             return
         placeholders = ",".join("?" * len(proxy_ids))
-        rows = self._conn.execute(
-            f"SELECT host, port, type, username FROM proxies WHERE id IN ({placeholders})",
-            proxy_ids,
-        ).fetchall()
         with self._write_lock:
+            rows = self._conn.execute(
+                f"SELECT host, port, type, username FROM proxies WHERE id IN ({placeholders})",
+                proxy_ids,
+            ).fetchall()
             self._conn.execute(
                 f"DELETE FROM proxies WHERE id IN ({placeholders})", proxy_ids
             )
@@ -329,7 +400,7 @@ class Database:
                         _KEYRING_SERVICE,
                         _keyring_key(row["host"], row["port"], row["type"], row["username"]),
                     )
-                except keyring.errors.PasswordDeleteError:
+                except keyring.errors.KeyringError:
                     pass
 
     def reset_proxy_status(self, proxy_ids: list[int]) -> None:
@@ -492,11 +563,14 @@ class Database:
         fofa = dict(config.get("fofa", {}))
         api_key = fofa.pop("api_key", "")
         if api_key:
-            keyring.set_password(_KEYRING_SERVICE, _FOFA_KEYRING_KEY, api_key)
+            try:
+                keyring.set_password(_KEYRING_SERVICE, _FOFA_KEYRING_KEY, api_key)
+            except keyring.errors.KeyringError as exc:
+                _logger.warning("Keyring write failed for FOFA key: %s", exc)
         else:
             try:
                 keyring.delete_password(_KEYRING_SERVICE, _FOFA_KEYRING_KEY)
-            except keyring.errors.PasswordDeleteError:
+            except keyring.errors.KeyringError:
                 pass
         self.set_config("auto_crawl_config", {"fofa": fofa, "free": config.get("free", {})})
 
@@ -506,5 +580,9 @@ class Database:
         if saved is None:
             return None
         fofa = dict(saved.get("fofa", {}))
-        fofa["api_key"] = keyring.get_password(_KEYRING_SERVICE, _FOFA_KEYRING_KEY) or ""
+        try:
+            fofa["api_key"] = keyring.get_password(_KEYRING_SERVICE, _FOFA_KEYRING_KEY) or ""
+        except keyring.errors.KeyringError as exc:
+            _logger.warning("Keyring read failed for FOFA key: %s", exc)
+            fofa["api_key"] = ""
         return {"fofa": fofa, "free": saved.get("free", {})}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,7 +67,12 @@ class Config:
             setattr(c, key, db.get_config(key, default))
         for env_key, (attr, cast) in _ENV_OVERRIDES.items():
             if val := os.environ.get(env_key):
-                setattr(c, attr, cast(val))
+                try:
+                    setattr(c, attr, cast(val))
+                except (ValueError, TypeError) as exc:
+                    logging.getLogger(__name__).warning(
+                        "忽略无效环境变量 %s=%r: %s", env_key, val, exc
+                    )
         return c
 
     def save(self):

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from urllib.request import pathname2url
 
 import keyring
 from PyQt6.QtWidgets import (
@@ -125,7 +124,7 @@ class SubscriptionDialog(QDialog):
         )
         if not path:
             return
-        url = "file://" + pathname2url(path)
+        url = Path(path).as_uri()
         self._urls.append(url)
         self._list.addItem(_display_label(url))
         _save_urls(self._urls)

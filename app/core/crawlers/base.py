@@ -71,7 +71,9 @@ class BaseCrawler(ABC):
             except RateLimited as exc:
                 rate_limit_retries += 1
                 if rate_limit_retries >= 3:
-                    logger.warning("%s rate-limited 3 times; giving up", self.name)
+                    msg = "rate-limited 3 times; giving up"
+                    logger.warning("%s %s", self.name, msg)
+                    errors.append(msg)
                     break
                 logger.warning("%s rate-limited; sleeping %.1fs", self.name, exc.retry_after)
                 await asyncio.sleep(exc.retry_after)
